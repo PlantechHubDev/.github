@@ -98,26 +98,29 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           lint=false
+          long_lived=false
+          case "$HEAD_REF" in
+            develop | master | main | test | demo) long_lived=true ;;
+          esac
           if [ "$EVENT" != pull_request ]; then
             echo "Event '$EVENT': commit-lint runs on pull requests only."
+          elif [ "$long_lived" = true ] && [ "$HEAD_REPO" = "$REPO" ]; then
+            # Only this repo's own long-lived branches skip; a fork's
+            # develop/master is linted like any other head.
+            echo "Head '$HEAD_REF' is a long-lived branch of $REPO: skipping."
+          elif [ "$AUTHOR" = 'dependabot[bot]' ]; then
+            echo "Dependabot PR: skipping."
+          elif printf '%s\n' "$HEAD_REF" | grep -Eq '^(feat|fix|chore|docs|hotfix)/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$' \
+            || printf '%s\n' "$HEAD_REF" | grep -Eq '^revert-[0-9]+-'; then
+            lint=true
           else
-            case "$HEAD_REF" in
-              develop | master | main | test | demo)
-                echo "Head '$HEAD_REF' is a long-lived branch: skipping." ;;
-              *)
-                if [ "$AUTHOR" = 'dependabot[bot]' ]; then
-                  echo "Dependabot PR: skipping."
-                elif printf '%s\n' "$HEAD_REF" | grep -Eq '^(feat|fix|chore|docs|hotfix)/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$' \
-                  || printf '%s\n' "$HEAD_REF" | grep -Eq '^revert-[0-9]+-'; then
-                  lint=true
-                else
-                  echo "::error::Branch '$HEAD_REF' must match ^(feat|fix|chore|docs|hotfix)/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*\$ (or GitHub's revert-<n>-...)."
-                  exit 1
-                fi ;;
-            esac
+            echo "::error::Branch '$HEAD_REF' (from $HEAD_REPO) must match ^(feat|fix|chore|docs|hotfix)/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*\$ (or GitHub's revert-<n>-...)."
+            exit 1
           fi
           echo "lint=$lint" >>"$GITHUB_OUTPUT"
 
