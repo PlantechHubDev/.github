@@ -1,0 +1,19 @@
+# gitleaks configuration for this repo (used by the pre-commit hook and by
+# checks.yml's secret-scan job).
+#
+# Keep gitleaks' default rules: a .gitleaks.toml without [extend] would
+# replace them and scan for nothing.
+#
+# Allow-list: empty. Add an entry only for a confirmed false positive, with a
+# comment above it saying what the match is and why it is not a secret, e.g.
+#
+#   [[allowlists]]
+#   description = "<what this is and why it is safe>"
+#   paths = ['''^path/to/fixture\.json$''']
+#
+# Never allow-list a real secret: rotate it instead.
+
+title = "PlantechHubDev/.github gitleaks config"
+
+[extend]
+useDefault = true

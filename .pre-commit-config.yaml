@@ -1,0 +1,19 @@
+# Local hooks. Install once per clone (every worktree inherits them):
+#   pre-commit install
+# default_install_hook_types below makes that one command install all three
+# hook types; gitleaks is limited to the pre-commit stage so it runs once per
+# commit. Hooks are advisory; CI (ci-ok) is the gate.
+default_install_hook_types: [pre-commit, prepare-commit-msg, commit-msg]
+
+repos:
+  - repo: https://github.com/PlantechHubDev/.github
+    rev: v1.0.0
+    hooks:
+      - id: add-issue-ref
+      - id: check-commit-msg
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        stages: [pre-commit]
