@@ -1,0 +1,46 @@
+# This repo's own CI. It calls the local checks.yml, so a PR here tests the
+# workflow and scripts at its own head, not at a released tag.
+# ci-ok is the only required check.
+
+name: ci
+
+on:
+  push:
+    branches: ['**', '!master', '!develop', '!main']
+  pull_request:
+    branches: [develop, master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      checks-ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: actionlint
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
+
+      - name: shellcheck
+        run: shellcheck --version && shellcheck -s sh hooks/*.sh
+
+  ci-ok:
+    if: always()
+    needs: [checks, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs passed
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
