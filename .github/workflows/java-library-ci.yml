@@ -1,0 +1,137 @@
+# Build and test a java library, and on PRs require a version bump for
+# library changes. Called from the library's ci.yml:
+#
+#   build:
+#     uses: PlantechHubDev/.github/.github/workflows/java-library-ci.yml@vX.Y.Z
+#     permissions:
+#       contents: read
+#       checks: write      # JUnit summary
+#       packages: read     # pth-mysql-test, when mysql-test-image is set
+#     with:
+#       mysql-test-image: ghcr.io/plantechhubdev/pth-mysql-test:<tag>   # only if the tests use it
+#     secrets:
+#       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+#
+# Jobs:
+#   test           Gradle clean build (tests included), reports, JUnit summary.
+#                  Skipped on Dependabot runs.
+#   version-check  pull_request only: the caller's
+#                  .github/scripts/check-version-bump.sh against the PR base.
+#                  Stays until per-library computed versions replace it.
+#
+# The caller keeps its own ci-ok job; no job here is named ci-ok.
+
+name: java-library-ci
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: Zulu JDK version for Gradle.
+        type: string
+        default: '17'
+      mysql-test-image:
+        description: Exact pth-mysql-test image (ghcr.io/plantechhubdev/pth-mysql-test:<tag>) the tests need, or empty for none. Pulled with the job's GITHUB_TOKEN, so the package must grant this repo Read.
+        type: string
+        default: ''
+    secrets:
+      PUBLISH_TOKEN:
+        description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Dependabot-triggered runs get no Actions secrets, so PUBLISH_TOKEN (GitHub Packages)
+    # would be empty and the build would fail; skip the job for Dependabot PRs.
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: write
+      packages: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
+          java-version: ${{ inputs.java-version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Log in to GHCR (pth-mysql-test image)
+        if: inputs.mysql-test-image != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull test DB image (fail fast)
+        if: inputs.mysql-test-image != ''
+        timeout-minutes: 3
+        env:
+          IMAGE: ${{ inputs.mysql-test-image }}
+        run: |
+          timeout 120 docker pull "$IMAGE" || { echo "::error::Cannot pull $IMAGE. It must be published by plantechhubdev/platform-tests (publish-mysql-test workflow), and its package settings (Manage Actions access) must give this repo Read. See platform-tests docs/testing-strategy.md (merge prerequisites)."; exit 1; }
+          echo "PTH_MYSQL_TEST_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Build with Gradle
+        env:
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
+
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports
+          path: |
+            build/reports/tests
+            build/reports/jacoco
+
+      - name: JUnit summary
+        if: always()
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: build/test-results/test/*.xml
+
+  version-check:
+    # Library code (src/main/**) or dependency changes must bump the publication version in
+    # build.gradle: the publish workflow only publishes versions that do not exist yet, and services
+    # pin exact versions. Test-, CI- and docs-only PRs pass. The script lives in the caller repo.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
+          java-version: ${{ inputs.java-version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Require a version bump for library code or dependency changes
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash .github/scripts/check-version-bump.sh "origin/$BASE_REF"

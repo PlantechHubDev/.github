@@ -1,0 +1,144 @@
+# Build a java library and publish its version to GitHub Packages (Maven) if
+# that version is new. Called from the library's publish.yml, on pushes to the
+# branch that publishes:
+#
+#   publish:
+#     uses: PlantechHubDev/.github/.github/workflows/java-library-publish.yml@vX.Y.Z
+#     permissions:
+#       actions: read      # Teams card reads the run
+#       contents: read
+#       packages: read     # pth-mysql-test, when mysql-test-image is set
+#     with:
+#       artifact-id: data-library
+#     secrets:
+#       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+#       LIBRARY_WEBHOOK_URI: ${{ secrets.LIBRARY_WEBHOOK_URI }}
+#
+# Job publish-package: Gradle clean build (tests included); reads the version
+# from the caller's printPublicationVersion task; asks the registry (the
+# caller's .github/scripts/package-version-status.sh) whether
+# com.plantechhub:<artifact-id>:<version> exists; runs gradle publish only when
+# it doesn't. Nothing here deletes or prunes old package versions: services pin
+# exact versions, and a released version must stay resolvable.
+#
+# No job here is named ci-ok.
+
+name: java-library-publish
+
+on:
+  workflow_call:
+    inputs:
+      artifact-id:
+        description: Maven artifactId under com.plantechhub, e.g. data-library.
+        type: string
+        required: true
+      java-version:
+        description: Zulu JDK version for Gradle.
+        type: string
+        default: '17'
+      mysql-test-image:
+        description: Exact pth-mysql-test image the tests need, or empty for none. Pulled with the job's GITHUB_TOKEN, so the package must grant this repo Read.
+        type: string
+        default: ''
+    secrets:
+      PUBLISH_TOKEN:
+        description: Reads and publishes com.plantechhub packages in GitHub Packages (Maven).
+        required: true
+      LIBRARY_WEBHOOK_URI:
+        description: Teams channel webhook for the release card. Without it, no card is sent.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    env:
+      TEAMS_ENABLED: ${{ secrets.LIBRARY_WEBHOOK_URI != '' }}
+    steps:
+      - name: Check the inputs
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact-id }}
+        run: |
+          printf '%s' "$ARTIFACT_ID" | grep -Eq '^[a-z0-9][a-z0-9.-]*$' || { echo "::error::artifact-id must be lower-case letters, digits, dots and dashes (got '$ARTIFACT_ID')"; exit 1; }
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Notification
+        if: env.TEAMS_ENABLED == 'true'
+        uses: toko-bifrost/ms-teams-deploy-card@288bb1d919f2a1823ecbd8cb1ff5faf9d6ac2a52 # master (3.1.2 plus README-only commits)
+        with:
+          github-token: ${{ github.token }}
+          webhook-uri: ${{ secrets.LIBRARY_WEBHOOK_URI }}
+          environment: ${{ github.ref }}
+          timezone: "America/New_York"
+
+      - name: Set up JDK
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
+          java-version: ${{ inputs.java-version }}
+
+      - name: Log in to GHCR (pth-mysql-test image)
+        if: inputs.mysql-test-image != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull test DB image (fail fast)
+        if: inputs.mysql-test-image != ''
+        timeout-minutes: 3
+        env:
+          IMAGE: ${{ inputs.mysql-test-image }}
+        run: |
+          timeout 120 docker pull "$IMAGE" || { echo "::error::Cannot pull $IMAGE. It must be published by plantechhubdev/platform-tests (publish-mysql-test workflow), and its package settings (Manage Actions access) must give this repo Read. See platform-tests docs/testing-strategy.md (merge prerequisites)."; exit 1; }
+          echo "PTH_MYSQL_TEST_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Build with Gradle
+        env:
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
+
+      - name: Check whether this version is already published
+        id: release
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact-id }}
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          version=$(./gradlew -q -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" printPublicationVersion | tr -d '\r' | tail -n 1)
+          if ! [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+_-]*$ ]] || [ "$version" = "unspecified" ]; then
+            echo "::error::Could not determine the publication version (got '$version')"
+            exit 1
+          fi
+          status=$(bash .github/scripts/package-version-status.sh "$ARTIFACT_ID" "$version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$status" = "exists" ]; then
+            echo "::notice::Version $version already published; skipping publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $version of com.plantechhub:$ARTIFACT_ID is new; publishing"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.release.outputs.publish == 'true'
+        env:
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" publish
