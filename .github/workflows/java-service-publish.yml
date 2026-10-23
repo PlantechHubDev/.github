@@ -1,0 +1,164 @@
+# Build a java service and push its multi-arch image to ECR. Called from the
+# service's publish.yml, on pushes to the branches that publish:
+#
+#   publish:
+#     uses: PlantechHubDev/.github/.github/workflows/java-service-publish.yml@vX.Y.Z
+#     permissions:
+#       actions: read      # Teams card reads the run
+#       contents: read
+#       id-token: write    # OIDC to AWS
+#       packages: read     # pth-mysql-test, when mysql-test-image is set
+#     with:
+#       service: calc-service
+#       ecr-role-arn: ${{ vars.ECR_PUSH_ROLE_ARN }}
+#     secrets:
+#       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+#       TEAMS_WEBHOOK_URI: ${{ secrets.TEAMS_WEBHOOK_URI }}
+#
+# Job build-push: Gradle clean build (tests included), then
+# linux/amd64 + linux/arm64 pushed to ECR only, tagged :<branch> and
+# :sha-<7>. AWS access is OIDC only; the role ARN comes from the caller (the
+# org variable), never from this public repo. No job here is named ci-ok, so a
+# publish run can never satisfy the required check.
+
+name: java-service-publish
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: The service name, which is also its ECR repository name, e.g. calc-service.
+        type: string
+        required: true
+      java-version:
+        description: Zulu JDK version for Gradle.
+        type: string
+        default: '17'
+      ecr-role-arn:
+        description: IAM role to assume through OIDC for the ECR push. Pass vars.ECR_PUSH_ROLE_ARN; never write the ARN in a file.
+        type: string
+        required: true
+      mysql-test-image:
+        description: Exact pth-mysql-test image the tests need, or empty for none. Pulled with the job's GITHUB_TOKEN, so the package must grant this repo Read.
+        type: string
+        default: ''
+    secrets:
+      PUBLISH_TOKEN:
+        description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
+        required: true
+      TEAMS_WEBHOOK_URI:
+        description: Teams channel webhook for the deploy card. Without it, no card is sent.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      packages: read
+    # Its own group name, so a caller that also sets a publish-<ref> concurrency group can't deadlock with it.
+    concurrency:
+      group: java-service-publish-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+      TEAMS_ENABLED: ${{ secrets.TEAMS_WEBHOOK_URI != '' }}
+    steps:
+      - name: Check the inputs
+        env:
+          SERVICE: ${{ inputs.service }}
+          ROLE: ${{ inputs.ecr-role-arn }}
+        run: |
+          printf '%s' "$SERVICE" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || { echo "::error::service must be lower-case letters, digits and dashes (got '$SERVICE')"; exit 1; }
+          [ -n "$ROLE" ] || { echo "::error::ecr-role-arn is empty: pass vars.ECR_PUSH_ROLE_ARN (an org variable visible to this repo)"; exit 1; }
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Teams deploy card
+        if: env.TEAMS_ENABLED == 'true'
+        uses: toko-bifrost/ms-teams-deploy-card@288bb1d919f2a1823ecbd8cb1ff5faf9d6ac2a52 # master (3.1.2 plus README-only commits)
+        with:
+          github-token: ${{ github.token }}
+          webhook-uri: ${{ secrets.TEAMS_WEBHOOK_URI }}
+          environment: ${{ github.ref }}
+          timezone: "America/New_York"
+
+      - name: Set up JDK
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
+          java-version: ${{ inputs.java-version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Log in to GHCR (pth-mysql-test image)
+        if: inputs.mysql-test-image != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull test DB image (fail fast)
+        if: inputs.mysql-test-image != ''
+        timeout-minutes: 3
+        env:
+          IMAGE: ${{ inputs.mysql-test-image }}
+        run: |
+          timeout 120 docker pull "$IMAGE" || { echo "::error::Cannot pull $IMAGE. It must be published by plantechhubdev/platform-tests (publish-mysql-test workflow), and its package settings (Manage Actions access) must give this repo Read. See platform-tests docs/testing-strategy.md (merge prerequisites)."; exit 1; }
+          echo "PTH_MYSQL_TEST_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Build with Gradle
+        env:
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.ecr-role-arn }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Compute image tags
+        id: tags
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SERVICE: ${{ inputs.service }}
+        run: |
+          TAG="$(basename "${GITHUB_REF}")"
+          printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$' || { echo "::error::'$TAG' (from $GITHUB_REF) is not a valid image tag"; exit 1; }
+          SHA_TAG="sha-${GITHUB_SHA::7}"
+          {
+            echo "list<<EOF"
+            echo "${ECR_REGISTRY}/${SERVICE}:${TAG}"
+            echo "${ECR_REGISTRY}/${SERVICE}:${SHA_TAG}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.list }}
