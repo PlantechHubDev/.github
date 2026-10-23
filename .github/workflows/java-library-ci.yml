@@ -11,8 +11,9 @@
 #     secrets:
 #       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
 #
-# Job test: Gradle clean build (tests included), reports, JUnit summary.
-# Skipped on Dependabot runs.
+# Job test: fails if a committed *.gradle file declares mavenLocal(), then
+# Gradle clean build (tests included), reports, JUnit summary. Skipped on
+# Dependabot runs.
 #
 # No version-check job: from v1.2.0, java-library-publish.yml computes each
 # release's version from the commits, so PRs no longer bump it by hand.
@@ -56,6 +57,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: No mavenLocal() in committed Gradle files
+        # mavenLocal() is local-only: it is how a laptop tries an unreleased library
+        # (publishToMavenLocal). Committed, it would make builds depend on ~/.m2.
+        # Commented-out lines (// or *) don't count.
+        run: |
+          rc=0
+          found=$(git grep -nE '^[[:space:]]*([^/*[:space:]].*)?mavenLocal[[:space:]]*\(' -- '*.gradle' '*.gradle.kts') || rc=$?
+          case "$rc" in
+            0)
+              printf '%s\n' "$found" | while IFS= read -r hit; do
+                echo "::error file=${hit%%:*}::mavenLocal() is local-only and must not be committed: ${hit}"
+              done
+              exit 1 ;;
+            1) echo "No mavenLocal() in committed Gradle files." ;;
+            *) echo "::error::git grep failed (exit $rc)"; exit 1 ;;
+          esac
 
       - name: Set up JDK
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
