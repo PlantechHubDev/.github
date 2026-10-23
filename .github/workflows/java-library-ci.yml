@@ -1,5 +1,4 @@
-# Build and test a java library, and on PRs require a version bump for
-# library changes. Called from the library's ci.yml:
+# Build and test a java library. Called from the library's ci.yml:
 #
 #   build:
 #     uses: PlantechHubDev/.github/.github/workflows/java-library-ci.yml@vX.Y.Z
@@ -12,12 +11,11 @@
 #     secrets:
 #       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
 #
-# Jobs:
-#   test           Gradle clean build (tests included), reports, JUnit summary.
-#                  Skipped on Dependabot runs.
-#   version-check  pull_request only: the caller's
-#                  .github/scripts/check-version-bump.sh against the PR base.
-#                  Stays until per-library computed versions replace it.
+# Job test: Gradle clean build (tests included), reports, JUnit summary.
+# Skipped on Dependabot runs.
+#
+# No version-check job: from v1.2.0, java-library-publish.yml computes each
+# release's version from the commits, so PRs no longer bump it by hand.
 #
 # The caller keeps its own ci-ok job; no job here is named ci-ok.
 
@@ -105,33 +103,3 @@ jobs:
         uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
         with:
           report_paths: build/test-results/test/*.xml
-
-  version-check:
-    # Library code (src/main/**) or dependency changes must bump the publication version in
-    # build.gradle: the publish workflow only publishes versions that do not exist yet, and services
-    # pin exact versions. Test-, CI- and docs-only PRs pass. The script lives in the caller repo.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Check out the repository (full history)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up JDK
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
-        with:
-          distribution: zulu
-          java-version: ${{ inputs.java-version }}
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
-
-      - name: Require a version bump for library code or dependency changes
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: bash .github/scripts/check-version-bump.sh "origin/$BASE_REF"
