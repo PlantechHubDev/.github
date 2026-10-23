@@ -15,7 +15,7 @@
 # Gradle clean build (tests included), reports, JUnit summary. Skipped on
 # Dependabot runs.
 #
-# No version-check job: from v1.2.0, java-library-publish.yml computes each
+# No version-check job: from v2.0.0, java-library-publish.yml computes each
 # release's version from the commits, so PRs no longer bump it by hand.
 #
 # The caller keeps its own ci-ok job; no job here is named ci-ok.
