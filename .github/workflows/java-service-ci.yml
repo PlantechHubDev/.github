@@ -40,8 +40,8 @@ on:
         default: ''
     secrets:
       PUBLISH_TOKEN:
-        description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build. Needed by every non-Dependabot run; optional only so that a Dependabot run (which gets no secrets) reaches the test job's skip instead of failing when the call starts.
-        required: false
+        description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
+        required: true
 
 permissions:
   contents: read
@@ -58,12 +58,6 @@ jobs:
       checks: write
       packages: read
     steps:
-      - name: Check that PUBLISH_TOKEN was passed
-        env:
-          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
-        run: |
-          [ -n "$PACKAGES_TOKEN" ] || { echo "::error::PUBLISH_TOKEN not passed: map it explicitly in the calling job's secrets block (PUBLISH_TOKEN from the org secret)"; exit 1; }
-
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
