@@ -1,0 +1,18 @@
+# Hooks this repo publishes for the pre-commit framework (https://pre-commit.com).
+# Every PlantechHubDev repo uses them from its .pre-commit-config.yaml at a pinned rev.
+
+- id: add-issue-ref
+  name: add Refs trailer from the branch name
+  description: 'On <type>/<issue>-<slug> branches, append "Refs: #<issue>" when the message has no Refs line.'
+  entry: hooks/add-issue-ref.sh
+  language: script
+  stages: [prepare-commit-msg]
+  always_run: true
+
+- id: check-commit-msg
+  name: check commit message format
+  description: 'Conventional Commits subject plus a Refs trailer (engineering-handbook workflow.md, "Commits").'
+  entry: hooks/check-commit-msg.sh
+  language: script
+  stages: [commit-msg]
+  always_run: true

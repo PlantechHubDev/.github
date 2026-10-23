@@ -1,0 +1,148 @@
+# Shared checks every PlantechHubDev repo runs from its own ci.yml:
+#
+#   checks:
+#     uses: PlantechHubDev/.github/.github/workflows/checks.yml@vX.Y.Z
+#     with:
+#       checks-ref: vX.Y.Z   # the same tag, so CI runs the hook's script
+#
+# Jobs:
+#   secret-scan  gitleaks (pinned container image) over the push or PR range,
+#                --redact. Allow-listing: the caller repo's .gitleaks.toml.
+#   commit-lint  on pull_request: the branch-name rule, then
+#                hooks/check-commit-msg.sh over the PR range. On push: a
+#                passing no-op (hooks cover local commits; the PR is the gate).
+#
+# Neither job has a job-level if: skips are steps, so a required check never
+# reports "skipped".
+
+name: checks
+
+on:
+  workflow_call:
+    inputs:
+      checks-ref:
+        description: Ref (normally the same tag as the uses line) to check out PlantechHubDev/.github at, for hooks/check-commit-msg.sh.
+        type: string
+        required: true
+      gitleaks-image:
+        description: gitleaks container image, pinned to an exact tag.
+        type: string
+        default: ghcr.io/gitleaks/gitleaks:v8.30.1
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Work out the commit range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          zero=$(printf '%040d' 0)   # the all-zeros SHA GitHub sends for a created or deleted branch
+          case "$EVENT" in
+            pull_request)
+              range="$PR_BASE..$PR_HEAD" ;;
+            push)
+              head=${AFTER:-$SHA}
+              if [ "$head" = "$zero" ]; then
+                echo "Branch deleted: nothing to scan."
+                range=""
+              elif [ -n "$BEFORE" ] && [ "$BEFORE" != "$zero" ] \
+                && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                range="$BEFORE..$head"
+              else
+                # New branch, or a force-push whose old tip is gone: scan the
+                # commits that are not on the default branch.
+                range="$head --not refs/remotes/origin/$DEFAULT_BRANCH"
+              fi ;;
+            *)
+              echo "::error::checks.yml supports push and pull_request events, not '$EVENT'"
+              exit 1 ;;
+          esac
+          echo "Range: ${range:-<none>}"
+          echo "range=$range" >>"$GITHUB_OUTPUT"
+
+      - name: gitleaks
+        if: steps.range.outputs.range != ''
+        env:
+          IMAGE: ${{ inputs.gitleaks-image }}
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" "$IMAGE" \
+            git /repo --redact --verbose --no-banner --log-opts="$RANGE"
+
+  commit-lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Decide whether to lint
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          lint=false
+          long_lived=false
+          case "$HEAD_REF" in
+            develop | master | main | test | demo) long_lived=true ;;
+          esac
+          if [ "$EVENT" != pull_request ]; then
+            echo "Event '$EVENT': commit-lint runs on pull requests only."
+          elif [ "$long_lived" = true ] && [ "$HEAD_REPO" = "$REPO" ]; then
+            # Only this repo's own long-lived branches skip; a fork's
+            # develop/master is linted like any other head.
+            echo "Head '$HEAD_REF' is a long-lived branch of $REPO: skipping."
+          elif [ "$AUTHOR" = 'dependabot[bot]' ]; then
+            echo "Dependabot PR: skipping."
+          elif printf '%s\n' "$HEAD_REF" | grep -Eq '^(feat|fix|chore|docs|hotfix)/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$' \
+            || printf '%s\n' "$HEAD_REF" | grep -Eq '^revert-[0-9]+-'; then
+            lint=true
+          else
+            echo "::error::Branch '$HEAD_REF' (from $HEAD_REPO) must match ^(feat|fix|chore|docs|hotfix)/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*\$ (or GitHub's revert-<n>-...)."
+            exit 1
+          fi
+          echo "lint=$lint" >>"$GITHUB_OUTPUT"
+
+      - name: Check out the repository (full history)
+        if: steps.gate.outputs.lint == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the shared scripts at checks-ref
+        if: steps.gate.outputs.lint == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      - name: Check commit messages
+        if: steps.gate.outputs.lint == 'true'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh .pth-checks/hooks/check-commit-msg.sh --range "$PR_BASE..$PR_HEAD"
