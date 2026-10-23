@@ -1,0 +1,52 @@
+# git-cliff configuration for PlantechHubDev java library releases.
+# java-library-publish.yml checks this repo out at its checks-ref and runs the
+# pinned git-cliff with this file, over the library's commits since its last
+# vX.Y.Z tag:
+#   git cliff --config cliff.toml --bumped-version   -> the next version
+#   git cliff --config cliff.toml --latest           -> that release's notes
+#
+# Version rules:
+#   breaking (`type!:` or a `BREAKING CHANGE:` footer) -> major, also from 0.x
+#   any feat                                           -> minor, also from 0.x
+#   anything else                                      -> patch (every release
+#                                                         merge publishes)
+# Only tags matching tag_pattern count, so 1.0 or v2.0.0-rc1 are ignored.
+# The notes list each commit with its short SHA and its Refs: footer.
+
+[changelog]
+header = ""
+body = """
+## {{ version | default(value="Unreleased") }}{% if timestamp %} ({{ timestamp | date(format="%Y-%m-%d") }}){% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.breaking %}**BREAKING** {% endif %}{% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | split(pat="\n") | first | trim }} ({{ commit.id | truncate(length=7, end="") }}){% for footer in commit.footers %}{% if footer.token == "Refs" %}, Refs: {{ footer.value }}{% endif %}{% endfor %}
+{%- endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+# Commits from before the commit standard still count (as patch) and are listed.
+filter_unconventional = false
+require_conventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+topo_order = false
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^Merge (pull request|branch|remote-tracking branch) ", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^revert|^Revert ", group = "<!-- 3 -->Reverts" },
+  { message = ".*", group = "<!-- 4 -->Other changes" },
+]
+
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true
