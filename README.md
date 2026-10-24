@@ -11,7 +11,7 @@ Org-wide defaults and shared checks for every PlantechHubDev repo.
 
 **Why one place.** Issues and PRs read the same way in every repo, so triage and review don't depend on which repo you are in, and a template changes once instead of per repo. Repos therefore don't keep their own issue templates; conventions are in the engineering handbook (`workflow.md`).
 
-**Shared checks and hooks.**
+**Shared checks, hooks and build workflows.**
 
 | Path | What it is |
 |---|---|
@@ -20,6 +20,11 @@ Org-wide defaults and shared checks for every PlantechHubDev repo.
 | `hooks/add-issue-ref.sh` | `prepare-commit-msg` hook: on `<type>/<issue>-<slug>` branches, appends `Refs: #<issue>` when the message has none. |
 | `.pre-commit-hooks.yaml` | Publishes the two hooks (`add-issue-ref`, `check-commit-msg`) for the [pre-commit](https://pre-commit.com) framework. |
 | `.pre-commit-config.yaml`, `.gitleaks.toml` | This repo's own hooks and gitleaks config. Every repo has the same two files. |
+| `.github/workflows/java-service-ci.yml` | Reusable build for a java service. Jobs: `test` (Gradle `clean build`; skipped on Dependabot runs) and `image-scan` (image built from `test`'s jar, Trivy CRITICAL/HIGH with `.trivyignore`). Inputs `service`, `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
+| `.github/workflows/java-service-publish.yml` | Reusable publish for a java service. Job `build-push`: Gradle `clean build`, then a linux/amd64 + linux/arm64 image to ECR only, tagged `:<branch>` and `:sha-<7>`, through OIDC. Inputs `service`, `java-version`, `ecr-role-arn` (pass `vars.ECR_PUSH_ROLE_ARN`), `mysql-test-image`; secrets `PUBLISH_TOKEN`, optional `TEAMS_WEBHOOK_URI`. |
+| `.github/workflows/java-library-ci.yml` | Reusable build for a java library. Jobs: `test` and, on PRs, `version-check` (the library's own `.github/scripts/check-version-bump.sh`). Inputs `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
+| `.github/workflows/java-library-publish.yml` | Reusable publish for a java library. Job `publish-package`: build, then `gradle publish` only if the version is not in the registry yet. Never prunes old versions. Inputs `artifact-id`, `java-version`, `mysql-test-image`; secrets `PUBLISH_TOKEN`, optional `LIBRARY_WEBHOOK_URI`. |
+| `.github/workflows/terraform-ci.yml` | Reusable static terraform check. Job `validate`, by `mode`: `modules` (fmt, init without backend, validate, tflint errors) or `live` (terragrunt hclfmt per file). No credentials. Inputs `mode`, `terraform-version`, `terragrunt-version`, `terragrunt-sha256`, `tflint-version`. |
 | `.github/workflows/ci.yml` | This repo's own CI: `checks` (the local `checks.yml`, so a PR here tests its own head), `lint` (actionlint, shellcheck) and `ci-ok`. |
 
 The commit standard itself (types, `Refs:`, `BREAKING CHANGE:`, exemptions) is documented in the engineering handbook, `workflow.md`, "Commits".
@@ -46,6 +51,8 @@ jobs:
     with:
       checks-ref: v1.0.0
 ```
+
+The build workflows are called the same way, as a job next to `checks`, with `permissions:` and `secrets:` given explicitly (never `secrets: inherit`). Each file's header shows its call. None of them has a job named `ci-ok`: the caller's own `ci-ok` job `needs:` them, and a publish run can never satisfy the required check. `pth-mysql-test` is pulled with the job's `GITHUB_TOKEN`, so its package settings must give each calling repo Read.
 
 In the repo's `.pre-commit-config.yaml`:
 
