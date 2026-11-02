@@ -1,0 +1,14 @@
+{
+  "number": 12,
+  "state": "open",
+  "title": "t",
+  "body": "platform-tests: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb platform-tests#2 via example-service#1\nharness: 41 passed, 0 failed\n\nplatform-tests: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb platform-tests#2 via example-service#1\nharness: 41 passed, 0 failed",
+  "head": {
+    "ref": "fix/1-example",
+    "sha": "2222222222222222222222222222222222222222"
+  },
+  "base": {
+    "ref": "develop",
+    "sha": "3333333333333333333333333333333333333333"
+  }
+}

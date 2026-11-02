@@ -33,7 +33,17 @@ jobs:
         run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
 
       - name: shellcheck
-        run: shellcheck --version && shellcheck -s sh hooks/*.sh
+        run: |
+          shellcheck --version
+          shellcheck -s sh hooks/*.sh
+          shellcheck -s bash scripts/*.sh scripts/fixtures/*/bin/*
+
+      - name: Script tests
+        run: |
+          for t in scripts/test-*.sh; do
+            echo "== $t"
+            bash "$t"
+          done
 
   ci-ok:
     if: always()

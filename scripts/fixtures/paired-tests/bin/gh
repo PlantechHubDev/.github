@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Stub for `gh`, used by scripts/test-paired-tests.sh. Serves recorded REST JSON from the
+# parent directory, applying any --jq filter with real jq (as gh does), and appends each
+# call's argv (one line) to $GH_LOG. A call with no recorded response fails like gh does.
+#   repos/<o>/<r>/pulls/<n>                     -> pulls-<n>.json
+#   repos/<o>/platform-tests/compare/<s>...master -> compare-<s>.json (none: HTTP 404)
+#   repos/<o>/<r>/actions/workflows/ci.yml/runs?head_sha=<s>...
+#                                               -> runs-<s>.json, or runs-<s>-<k>.json on the
+#                                                  k-th call when those exist (state in $GH_STATE)
+#   repos/<o>/<r>/actions/runs/<id>/jobs?per_page=100 -> jobs-<id>.json
+#   -X POST repos/<o>/<r>/actions/jobs/<id>/rerun -> logged, empty output
+# graphql is never expected from these scripts and always fails.
+D=$(cd "$(dirname "$0")/.." && pwd)
+echo "$*" >> "${GH_LOG:?}"
+args=" $* "
+
+jqf=""; prev=""; method=GET
+for a in "$@"; do
+  [ "$prev" = "--jq" ] && jqf=$a
+  { [ "$prev" = "-X" ] || [ "$prev" = "--method" ]; } && method=$a
+  prev=$a
+done
+
+serve() {
+  [ -f "$D/$1" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+  if [ -n "$jqf" ]; then jq -r "$jqf" "$D/$1"; else cat "$D/$1"; fi
+}
+
+case "$args" in
+  *" graphql "*)
+    echo "stub gh: graphql not expected" >&2; exit 1 ;;
+  *"/actions/jobs/"*"/rerun "*)
+    [ "$method" = POST ] || { echo "stub gh: rerun must be POST" >&2; exit 1; }
+    exit 0 ;;
+  *"/compare/"*"...master "*)
+    s=$(sed -n 's#.*/compare/\([^.]*\)\.\.\.master .*#\1#p' <<<"$args"); serve "compare-$s.json" ;;
+  *"/actions/workflows/ci.yml/runs?"*)
+    s=$(sed -n 's#.*head_sha=\([0-9a-f]*\).*#\1#p' <<<"$args")
+    if [ -f "$D/runs-$s-1.json" ]; then
+      c="${GH_STATE:?}/runs-$s.count"; k=$(( $(cat "$c" 2>/dev/null || echo 0) + 1 )); echo "$k" > "$c"
+      serve "runs-$s-$k.json"
+    else
+      serve "runs-$s.json"
+    fi ;;
+  *"/actions/runs/"*"/jobs?per_page=100 "*)
+    i=$(sed -n 's#.*/actions/runs/\([0-9]*\)/jobs.*#\1#p' <<<"$args"); serve "jobs-$i.json" ;;
+  *"/pulls/"*)
+    n=$(sed -n 's#.*/pulls/\([0-9]*\) .*#\1#p' <<<"$args"); serve "pulls-$n.json" ;;
+  *) echo "stub gh: unrecognised call: $*" >&2; exit 1 ;;
+esac

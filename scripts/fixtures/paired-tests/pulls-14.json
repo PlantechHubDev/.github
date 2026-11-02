@@ -1,0 +1,14 @@
+{
+  "number": 14,
+  "state": "open",
+  "title": "t",
+  "body": "## Evidence\r\n\r\n```\r\n  platform-tests: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb platform-tests#2 via example-service#1\r\nharness: ok\r\n```\r",
+  "head": {
+    "ref": "fix/1-example",
+    "sha": "2222222222222222222222222222222222222222"
+  },
+  "base": {
+    "ref": "develop",
+    "sha": "3333333333333333333333333333333333333333"
+  }
+}

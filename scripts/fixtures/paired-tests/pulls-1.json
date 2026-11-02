@@ -1,0 +1,14 @@
+{
+  "number": 1,
+  "state": "open",
+  "title": "t",
+  "body": "Bumps x from 1.0 to 1.1.",
+  "head": {
+    "ref": "dependabot/npm/x",
+    "sha": "2222222222222222222222222222222222222222"
+  },
+  "base": {
+    "ref": "develop",
+    "sha": "3333333333333333333333333333333333333333"
+  }
+}

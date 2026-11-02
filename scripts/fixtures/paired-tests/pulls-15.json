@@ -1,0 +1,14 @@
+{
+  "number": 15,
+  "state": "open",
+  "title": "t",
+  "body": "No platform-tests run needed.",
+  "head": {
+    "ref": "feat/40-thing",
+    "sha": "2222222222222222222222222222222222222222"
+  },
+  "base": {
+    "ref": "develop",
+    "sha": "3333333333333333333333333333333333333333"
+  }
+}

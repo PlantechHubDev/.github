@@ -1,0 +1,128 @@
+# Re-run only the paired-tests job of a PR's latest ci.yml run, so the check re-reads the
+# PR body and the paired platform-tests head without re-running the build. Re-running one
+# job keeps the run's other results, so the caller's ci-ok still sees the real build result
+# (a failed build stays red after a body edit). Two callers:
+#
+# A service repo, when a PR body is edited (same repo; GITHUB_TOKEN is enough):
+#
+#   on:
+#     pull_request:
+#       types: [edited]
+#   concurrency:              # SHOULD: a newer edit replaces a waiting re-run
+#     group: paired-tests-rerun-${{ github.event.pull_request.number }}
+#     cancel-in-progress: true
+#   jobs:
+#     rerun:
+#       uses: PlantechHubDev/.github/.github/workflows/paired-tests-rerun.yml@vX.Y.Z
+#       permissions:
+#         actions: write        # re-run the job
+#         pull-requests: read   # read the PR's head sha
+#       with:
+#         checks-ref: vX.Y.Z
+#         repo: ${{ github.repository }}
+#         pr: ${{ github.event.pull_request.number }}
+#
+# platform-tests, when a paired PR moves (cross-repo; needs the App):
+#
+#       with:
+#         checks-ref: vX.Y.Z
+#         repo: PlantechHubDev/<service>
+#         pr: <service PR number>
+#         app-id: ${{ vars.PTH_CI_APP_ID }}
+#       secrets:
+#         PTH_CI_APP_KEY: ${{ secrets.PTH_CI_APP_KEY }}
+#
+# The edited-trigger caller SHOULD set the concurrency group above, because each edit
+# otherwise starts a job that can wait up to 60 minutes for the ci.yml run.
+# Callers whose ci.yml also runs on push MUST name the push run's ci-ok job differently
+# (see paired-tests.yml), or a push run's ci-ok can satisfy the PR's required ci-ok.
+#
+# Inputs:
+#   checks-ref  ref of PlantechHubDev/.github for scripts/ (required).
+#   repo        owner/repo of the PR whose check to re-run (required).
+#   pr          the PR number (required).
+#   app-id      the CI GitHub App's ID (pass vars.PTH_CI_APP_ID); default ''.
+# Secrets:
+#   PTH_CI_APP_KEY  the App's private key (optional). With app-id and the key, the job mints
+#                   an App token for repo (actions: write, pull requests: read). Without both,
+#                   it uses the job's GITHUB_TOKEN, so the caller grants actions: write and
+#                   pull-requests: read, and repo must be the caller's own repo.
+#
+# The job has no permissions block of its own: it gets the caller's job permissions, so a
+# caller using the App grants nothing extra to its GITHUB_TOKEN.
+#
+# Job rerun: scripts/rerun-paired-tests.sh finds the newest ci.yml pull_request run for the
+# PR's head, waits up to 60 minutes for it to complete, and re-runs its paired-tests job.
+# No run yet passes (the next push runs the check); a run with no paired-tests job fails.
+
+name: paired-tests-rerun
+
+on:
+  workflow_call:
+    inputs:
+      checks-ref:
+        description: Ref (normally the same tag as the uses line) to check out PlantechHubDev/.github at, for scripts/rerun-paired-tests.sh.
+        type: string
+        required: true
+      repo:
+        description: owner/repo of the PR whose paired-tests job to re-run.
+        type: string
+        required: true
+      pr:
+        description: The PR number.
+        type: string
+        required: true
+      app-id:
+        description: The CI GitHub App's ID (pass vars.PTH_CI_APP_ID). With PTH_CI_APP_KEY, the job uses an App token; without, GITHUB_TOKEN.
+        type: string
+        default: ''
+    secrets:
+      PTH_CI_APP_KEY:
+        description: The CI GitHub App's private key. Optional; see app-id.
+        required: false
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    env:
+      HAS_APP: ${{ inputs.app-id != '' && secrets.PTH_CI_APP_KEY != '' }}
+    steps:
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      - name: Work out the target repo's owner and name
+        id: target
+        env:
+          REPO: ${{ inputs.repo }}
+        run: |
+          case "$REPO" in
+            */*) ;;
+            *) echo "::error::repo must be owner/repo, not '$REPO'"; exit 1 ;;
+          esac
+          echo "owner=${REPO%%/*}" >>"$GITHUB_OUTPUT"
+          echo "name=${REPO#*/}" >>"$GITHUB_OUTPUT"
+
+      - name: Mint an App token for the target repo
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.PTH_CI_APP_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          permission-actions: write
+          permission-pull-requests: read
+
+      - name: Re-run the paired-tests job
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          REPO: ${{ inputs.repo }}
+          PR: ${{ inputs.pr }}
+        run: bash .pth-checks/scripts/rerun-paired-tests.sh "$REPO" "$PR"
