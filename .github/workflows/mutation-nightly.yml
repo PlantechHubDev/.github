@@ -1,0 +1,211 @@
+# Nightly mutation testing (PIT) for a java repo. Called from the repo's
+# .github/workflows/mutation-nightly.yml (that file name is what the last-run lookup uses):
+#
+#   name: mutation-nightly
+#   on:
+#     schedule:
+#       - cron: '0 7 * * *'
+#     workflow_dispatch:
+#   jobs:
+#     mutation:
+#       uses: PlantechHubDev/.github/.github/workflows/mutation-nightly.yml@vX.Y.Z
+#       permissions:
+#         contents: read
+#         issues: write
+#         actions: read
+#         packages: read
+#       secrets: inherit
+#
+# The repo's Gradle build declares a `pitest` task that reads the comma-separated class
+# globs from -PpitestTargetClasses (none means the whole project) and writes
+# build/reports/pitest/mutations.xml (timestampedReports = false).
+#
+# Each night it runs PIT only on what changed on develop since the last successful run
+# (the `mutation-state` artifact holds that run's SHA). With no recorded SHA, an expired
+# artifact or a SHA that is not an ancestor of develop, it runs the whole project, and
+# its first run files every survivor. A night with no src/main or src/test change skips
+# PIT but still records the SHA. One open issue per production class, titled
+# "Mutation survivors: <fully.qualified.Class>", label mutation-survivor, created with
+# this workflow's GITHUB_TOKEN so the dispatcher recognises them (author github-actions).
+# An open issue with the same title is never duplicated.
+
+name: mutation-nightly
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: Zulu JDK version for Gradle.
+        type: string
+        default: '17'
+      checks-ref:
+        description: Tag of PlantechHubDev/.github whose scripts this run uses (mutation-survivors.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
+        type: string
+        default: v2.2.0
+    secrets:
+      PUBLISH_TOKEN:
+        description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+  packages: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    # The first run is a full run and may be long.
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+      packages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Caller workflow file: the last successful run of it names the last tested SHA.
+      CALLER_WORKFLOW: mutation-nightly.yml
+    steps:
+      - name: Check out develop with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      - name: Find the last tested SHA
+        id: last
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/last-state"
+          last=""
+          run_id=$(gh run list --repo "$REPO" --workflow "$CALLER_WORKFLOW" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty') || run_id=""
+          if [ -n "$run_id" ] && gh run download "$run_id" --repo "$REPO" -n mutation-state -D "$RUNNER_TEMP/last-state"; then
+            last=$(tr -d '[:space:]' < "$RUNNER_TEMP/last-state/sha.txt" 2>/dev/null || true)
+          fi
+          if [ -z "$last" ]; then
+            echo "No usable mutation-state artifact: full run."
+            mode=full
+          elif ! git merge-base --is-ancestor "$last" HEAD; then
+            echo "Last tested SHA $last is not an ancestor of HEAD: full run."
+            mode=full
+          else
+            echo "Last tested SHA: $last"
+            mode=incremental
+          fi
+          printf 'sha=%s\nmode=%s\n' "$last" "$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Find what changed
+        id: changes
+        env:
+          MODE: ${{ steps.last.outputs.mode }}
+          LAST: ${{ steps.last.outputs.sha }}
+        run: |
+          changed="$RUNNER_TEMP/changed.txt"
+          if [ "$MODE" = "full" ]; then
+            printf 'run=true\ntargets=\nwhole=\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only "$LAST..HEAD" > "$changed"
+          if ! grep -Eq '^src/(main|test)/' "$changed"; then
+            echo "No src/main or src/test change since $LAST: skipping PIT."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 .pth-checks/scripts/mutation-survivors.py targets --changed "$changed" > "$RUNNER_TEMP/targets.out"
+          cat "$RUNNER_TEMP/targets.out"
+          targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/targets.out")
+          whole=$(sed -n 's/^whole=//p' "$RUNNER_TEMP/targets.out")
+          if [ -z "$targets" ]; then
+            echo "Only non-Java source files changed (resources): skipping PIT."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff -U0 "$LAST..HEAD" -- src/main/java > "$RUNNER_TEMP/changes.diff"
+          printf 'run=true\ntargets=%s\nwhole=%s\n' "$targets" "$whole" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
+          java-version: ${{ inputs.java-version }}
+
+      - name: Set up Gradle
+        if: steps.changes.outputs.run == 'true'
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Run PIT
+        if: steps.changes.outputs.run == 'true'
+        env:
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          TARGETS: ${{ steps.changes.outputs.targets }}
+        run: |
+          if [ -n "$TARGETS" ]; then
+            ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" pitest "-PpitestTargetClasses=$TARGETS"
+          else
+            ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" pitest
+          fi
+
+      - name: Find survivors
+        if: steps.changes.outputs.run == 'true'
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          TARGETS: ${{ steps.changes.outputs.targets }}
+          WHOLE: ${{ steps.changes.outputs.whole }}
+        run: |
+          set -- --mutations build/reports/pitest/mutations.xml --repo "$REPO_NAME" --sha "$(git rev-parse HEAD)"
+          if [ -n "$TARGETS" ]; then
+            set -- "$@" --diff "$RUNNER_TEMP/changes.diff" --whole "$WHOLE"
+          fi
+          python3 .pth-checks/scripts/mutation-survivors.py survivors "$@" > "$RUNNER_TEMP/survivors.json"
+          echo "Survivor issues to consider: $(jq length "$RUNNER_TEMP/survivors.json")"
+
+      - name: File one issue per class
+        if: steps.changes.outputs.run == 'true'
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create mutation-survivor --repo "$REPO" --force --color D93F0B --description "Tests that run code without checking it (nightly PIT)"
+          gh issue list --repo "$REPO" --label mutation-survivor --state open --limit 1000 --json title --jq '.[].title' > "$RUNNER_TEMP/open-titles.txt"
+          jq -c '.[]' "$RUNNER_TEMP/survivors.json" | while IFS= read -r item; do
+            title=$(printf '%s' "$item" | jq -r .title)
+            if grep -Fxq -- "$title" "$RUNNER_TEMP/open-titles.txt"; then
+              echo "Open issue exists, skipping: $title"
+              continue
+            fi
+            printf '%s' "$item" | jq -r .body | gh issue create --repo "$REPO" --label mutation-survivor --title "$title" --body-file -
+          done
+
+      - name: Record the tested SHA
+        run: |
+          mkdir -p "$RUNNER_TEMP/mutation-state"
+          git rev-parse HEAD > "$RUNNER_TEMP/mutation-state/sha.txt"
+
+      - name: Upload the tested SHA
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-state
+          path: ${{ runner.temp }}/mutation-state/sha.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload the PIT report
+        if: always() && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pitest-report
+          path: build/reports/pitest
+          if-no-files-found: ignore
