@@ -7,9 +7,9 @@ Usage:
                                   [--diff <unified-diff> --whole <globs>]
 
 targets prints two lines: "targets=<comma globs>" and "whole=<comma globs>".
-  src/main/java/a/b/C.java            -> a.b.C*
-  src/test/java/a/b/CTest.java        -> a.b.C*  (also whole-class)
-  src/test/java/a/b/CProperties.java  -> a.b.C*  (also whole-class)
+  src/main/java/a/b/C.java            -> a.b.C,a.b.C$*  (not a.b.C*: that matches a.b.CustomerService)
+  src/test/java/a/b/CTest.java        -> a.b.C,a.b.C$*  (also whole-class)
+  src/test/java/a/b/CProperties.java  -> a.b.C,a.b.C$*  (also whole-class)
   anything else is ignored.
 
 survivors prints a JSON array of {class, title, body}, one item per outer
@@ -40,6 +40,11 @@ def to_fqcn(path):
     return path.replace("/", ".")
 
 
+def class_globs(fqcn):
+    """Exact class plus its nested classes; never sibling names sharing a prefix."""
+    return [fqcn, fqcn + "$*"]
+
+
 def cmd_targets(args):
     try:
         with open(args.changed, encoding="utf-8") as f:
@@ -50,17 +55,17 @@ def cmd_targets(args):
     for p in paths:
         m = MAIN_RE.match(p)
         if m:
-            glob = to_fqcn(m.group(1)) + "*"
-            if glob not in targets:
-                targets.append(glob)
+            for glob in class_globs(to_fqcn(m.group(1))):
+                if glob not in targets:
+                    targets.append(glob)
             continue
         m = TEST_RE.match(p)
         if m:
-            glob = to_fqcn(m.group(1)) + "*"
-            if glob not in targets:
-                targets.append(glob)
-            if glob not in whole:
-                whole.append(glob)
+            for glob in class_globs(to_fqcn(m.group(1))):
+                if glob not in targets:
+                    targets.append(glob)
+                if glob not in whole:
+                    whole.append(glob)
     print("targets=" + ",".join(targets))
     print("whole=" + ",".join(whole))
 

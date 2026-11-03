@@ -26,11 +26,16 @@ class TargetsTest(unittest.TestCase):
         return r.stdout.splitlines()
 
     def test_main_file_maps_to_class_glob(self):
-        self.assertEqual(self.targets(["src/main/java/a/b/C.java"]), ["targets=a.b.C*", "whole="])
+        self.assertEqual(self.targets(["src/main/java/a/b/C.java"]), ["targets=a.b.C,a.b.C$*", "whole="])
 
     def test_test_files_map_to_whole_class(self):
         out = self.targets(["src/test/java/a/b/CTest.java", "src/test/java/a/b/DProperties.java"])
-        self.assertEqual(out, ["targets=a.b.C*,a.b.D*", "whole=a.b.C*,a.b.D*"])
+        self.assertEqual(out, ["targets=a.b.C,a.b.C$*,a.b.D,a.b.D$*", "whole=a.b.C,a.b.C$*,a.b.D,a.b.D$*"])
+
+    def test_sibling_class_names_are_not_matched_by_prefix(self):
+        out = self.targets(["src/test/java/a/b/CTest.java"])
+        self.assertNotIn("a.b.C*", out[0])
+        self.assertNotIn("a.b.CustomerService", out[0])
 
     def test_other_paths_ignored(self):
         out = self.targets(["src/main/resources/x.yml", "build.gradle", "src/test/java/a/b/Helper.java", "README.md"])
@@ -38,7 +43,7 @@ class TargetsTest(unittest.TestCase):
 
     def test_mixed_and_deduplicated(self):
         out = self.targets(["src/main/java/a/b/C.java", "src/test/java/a/b/CTest.java", "src/main/java/a/E.java"])
-        self.assertEqual(out, ["targets=a.b.C*,a.E*", "whole=a.b.C*"])
+        self.assertEqual(out, ["targets=a.b.C,a.b.C$*,a.E,a.E$*", "whole=a.b.C,a.b.C$*"])
 
 
 class SurvivorsTest(unittest.TestCase):
@@ -66,10 +71,19 @@ class SurvivorsTest(unittest.TestCase):
         self.assertNotIn("| Foo.java | 30 |", items[0]["body"])
 
     def test_whole_keeps_every_survivor_of_that_class(self):
-        items = self.survivors("--diff", DIFF, "--whole", "a.b.Baz*")
+        items = self.survivors("--diff", DIFF, "--whole", "a.b.Baz,a.b.Baz$*")
         self.assertEqual(sorted(i["class"] for i in items), ["a.b.Baz", "a.b.Foo"])
         baz = next(i for i in items if i["class"] == "a.b.Baz")
         self.assertIn("| Baz.java | 5 |", baz["body"])
+
+    def test_whole_matches_exact_class_and_nested_not_siblings(self):
+        # Foo$Bar (nested) matches "a.b.Foo,a.b.Foo$*"; a sibling "a.b.FooBar" must not match "a.b.Foo".
+        items = self.survivors("--diff", os.path.join(FIX, "baz-line5.diff"), "--whole", "a.b.Foo,a.b.Foo$*")
+        foo = next(i for i in items if i["class"] == "a.b.Foo")
+        self.assertIn("| Foo.java | 30 |", foo["body"])
+        self.assertIn("| Foo.java | 12 |", foo["body"])
+        items = self.survivors("--diff", os.path.join(FIX, "baz-line5.diff"), "--whole", "a.b.Fo,a.b.Fo$*")
+        self.assertEqual([i["class"] for i in items], ["a.b.Baz"])
 
     def test_body_has_ready_contract_headings(self):
         body = self.survivors()[0]["body"]
