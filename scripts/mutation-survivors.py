@@ -130,12 +130,18 @@ def cell(text):
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+MAX_ROWS = 200  # keeps the body far below GitHub's 65,536-character issue limit
+
+
 def body(repo, sha, fqcn, rows):
     rows = sorted(rows, key=lambda r: (r["file"], r["line"], r["mutator"]))
+    omitted = max(0, len(rows) - MAX_ROWS)
+    rows = rows[:MAX_ROWS]
     table = "\n".join(
         f"| {cell(r['file'])} | {r['line']} | {cell(r['mutator'])} | {cell(r['description'])} ({r['status']}) |"
         for r in rows
     )
+    more = f"\n\n{omitted} more survivors in this class are not listed; the next nightly run lists them once these are killed." if omitted else ""
     return f"""**Repo:** {repo}
 
 ## Problem and outcome
@@ -144,7 +150,7 @@ Mutation testing (PIT, nightly run at `{sha}`) changed `{fqcn}` in the ways belo
 
 | File | Line | Mutator | Description |
 | --- | --- | --- | --- |
-{table}
+{table}{more}
 
 ## Acceptance criteria
 

@@ -94,11 +94,26 @@ class SurvivorsTest(unittest.TestCase):
         self.assertIn("NO_COVERAGE", body)
 
     def test_no_survivors_prints_empty_array(self):
-        empty = os.path.join(FIX, "empty.diff")
-        with open(empty, "w") as f:
-            f.write("")
-        self.addCleanup(os.unlink, empty)
-        self.assertEqual(self.survivors("--diff", empty), [])
+        with tempfile.TemporaryDirectory() as d:
+            empty = os.path.join(d, "empty.diff")
+            open(empty, "w").close()
+            self.assertEqual(self.survivors("--diff", empty), [])
+
+    def test_large_table_is_capped_below_issue_body_limit(self):
+        rows = "".join(
+            f"<mutation status='SURVIVED'><sourceFile>Big.java</sourceFile><mutatedClass>a.b.Big</mutatedClass>"
+            f"<lineNumber>{n}</lineNumber><mutator>x.MathMutator</mutator><description>changed something here</description></mutation>"
+            for n in range(1, 2001)
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.xml")
+            with open(path, "w") as f:
+                f.write(f"<mutations>{rows}</mutations>")
+            r = run("survivors", "--mutations", path, "--repo", "r", "--sha", "s")
+        body = json.loads(r.stdout)[0]["body"]
+        self.assertLess(len(body), 60000)
+        self.assertIn("1800 more", body)
+        self.assertIn("| Big.java | 1 |", body)
 
     def test_missing_mutations_file_exits_2(self):
         r = run("survivors", "--mutations", "/nonexistent.xml", "--repo", "r", "--sha", "s")

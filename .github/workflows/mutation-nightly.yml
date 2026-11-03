@@ -18,7 +18,9 @@
 #
 # The repo's Gradle build declares a `pitest` task that reads the comma-separated class
 # globs from -PpitestTargetClasses (none means the whole project) and writes
-# build/reports/pitest/mutations.xml (timestampedReports = false).
+# build/reports/pitest/mutations.xml (timestampedReports = false). It SHOULD set
+# failWhenNoMutations = false, so a night whose changed classes have nothing to mutate
+# (interfaces, enums) does not fail and stall the recorded SHA.
 #
 # Each night it runs PIT only on what changed on develop since the last successful run
 # (the `mutation-state` artifact holds that run's SHA). With no recorded SHA, an expired
@@ -64,7 +66,6 @@ jobs:
       actions: read
       packages: read
     env:
-      GH_TOKEN: ${{ github.token }}
       # Caller workflow file: the last successful run of it names the last tested SHA.
       CALLER_WORKFLOW: mutation-nightly.yml
     steps:
@@ -86,6 +87,7 @@ jobs:
       - name: Find the last tested SHA
         id: last
         env:
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           mkdir -p "$RUNNER_TEMP/last-state"
@@ -117,7 +119,7 @@ jobs:
             printf 'run=true\ntargets=\nwhole=\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git diff --name-only "$LAST..HEAD" > "$changed"
+          git diff --name-only --diff-filter=d "$LAST..HEAD" > "$changed"
           if ! grep -Eq '^src/(main|test)/' "$changed"; then
             echo "No src/main or src/test change since $LAST: skipping PIT."
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -128,7 +130,7 @@ jobs:
           targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/targets.out")
           whole=$(sed -n 's/^whole=//p' "$RUNNER_TEMP/targets.out")
           if [ -z "$targets" ]; then
-            echo "Only non-Java source files changed (resources): skipping PIT."
+            echo "No changed Java class to mutate (resources, test helpers or deletions only): skipping PIT."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -176,6 +178,7 @@ jobs:
       - name: File one issue per class
         if: steps.changes.outputs.run == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           gh label create mutation-survivor --repo "$REPO" --force --color D93F0B --description "Tests that run code without checking it (nightly PIT)"
