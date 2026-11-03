@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<report name="synthetic">
+  <package name="com/example">
+    <class name="com/example/Foo">
+      <counter type="INSTRUCTION" missed="10" covered="90"/>
+      <counter type="LINE" missed="100" covered="300"/>
+    </class>
+    <sourcefile name="Foo.java">
+      <counter type="LINE" missed="100" covered="300"/>
+    </sourcefile>
+    <counter type="LINE" missed="100" covered="300"/>
+  </package>
+  <package name="com/example/other">
+    <counter type="LINE" missed="187" covered="413"/>
+  </package>
+  <counter type="INSTRUCTION" missed="50" covered="950"/>
+  <counter type="BRANCH" missed="5" covered="5"/>
+  <counter type="LINE" missed="287" covered="713"/>
+</report>
