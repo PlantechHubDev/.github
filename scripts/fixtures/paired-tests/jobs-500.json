@@ -1,0 +1,23 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 70,
+      "name": "build / test",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 77,
+      "name": "paired-tests / check",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 79,
+      "name": "ci-ok",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

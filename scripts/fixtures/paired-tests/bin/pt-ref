@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Stub for the handbook's pt-ref, used by scripts/test-paired-tests.sh.
+# Appends its argv (one line) to $PT_LOG, prints $PT_OUT on stdout and $PT_ERR on stderr,
+# and exits with $PT_EXIT (default 0).
+echo "$*" >> "${PT_LOG:?}"
+[ -n "${PT_OUT:-}" ] && echo "$PT_OUT"
+[ -n "${PT_ERR:-}" ] && echo "$PT_ERR" >&2
+exit "${PT_EXIT:-0}"

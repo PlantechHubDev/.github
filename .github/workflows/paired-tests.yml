@@ -1,0 +1,138 @@
+# Check a PR's pasted platform-tests evidence against its pairing. Called from the repo's
+# ci.yml as a job next to checks and the build, which the repo's ci-ok job needs:
+#
+#   paired-tests:
+#     uses: PlantechHubDev/.github/.github/workflows/paired-tests.yml@vX.Y.Z
+#     permissions:
+#       contents: read
+#       pull-requests: read   # the gate reads the PR with the job's GITHUB_TOKEN
+#     with:
+#       checks-ref: vX.Y.Z    # the same tag, so the job runs this tag's scripts
+#       app-id: ${{ vars.PTH_CI_APP_ID }}
+#     secrets:
+#       PTH_CI_APP_KEY: ${{ secrets.PTH_CI_APP_KEY }}
+#
+# Push runs: a caller whose ci.yml also runs on push to feature branches MUST give the push
+# run's ci-ok job a different name, e.g.
+#   ci-ok:
+#     name: ${{ github.event_name == 'push' && 'ci-ok (push)' || 'ci-ok' }}
+# because on push this check is a passing no-op, and a push run's "ci-ok" on the PR's head
+# sha could otherwise satisfy the PR's required ci-ok check without the paired-tests result.
+#
+# Name the calling job paired-tests: rerun-paired-tests.sh re-runs the ci.yml job whose
+# name starts with "paired-tests" (here "paired-tests / check").
+#
+# Re-running after a PR body edit: see paired-tests-rerun.yml (its caller SHOULD set a
+# per-PR concurrency group with cancel-in-progress).
+#
+# Inputs:
+#   checks-ref    ref of PlantechHubDev/.github for scripts/ (required).
+#   handbook-ref  ref of PlantechHubDev/engineering-handbook for tools/pt-ref (default master).
+#   app-id        the CI GitHub App's ID (pass vars.PTH_CI_APP_ID); default ''.
+# Secrets:
+#   PTH_CI_APP_KEY  the App's private key (optional). With app-id and the key, the job mints
+#                   an App token (read-only: contents, issues, pull requests; only for
+#                   engineering-handbook, platform-tests and the calling repo) to read the
+#                   private handbook and the issues and PRs pt-ref follows. Without both, it
+#                   uses the job's GITHUB_TOKEN, which cannot read other private repos.
+#
+# Job check: on a pull request, scripts/paired-tests-check.sh reads the PR from the API (a
+# re-run replays the original payload, so the payload's body and head are never used), and
+# compares the body's "platform-tests: <sha>" line with the handbook's pt-ref. A head ref
+# with no issue number, a base other than master or main, and no line (Dependabot and other
+# secret-less PRs) passes without minting a token. On other events it is a passing no-op.
+# It has no job-level if: skips are steps, so a required check never reports "skipped".
+
+name: paired-tests
+
+on:
+  workflow_call:
+    inputs:
+      checks-ref:
+        description: Ref (normally the same tag as the uses line) to check out PlantechHubDev/.github at, for scripts/paired-tests-check.sh.
+        type: string
+        required: true
+      handbook-ref:
+        description: Ref of PlantechHubDev/engineering-handbook to take tools/pt-ref from.
+        type: string
+        default: master
+      app-id:
+        description: The CI GitHub App's ID (pass vars.PTH_CI_APP_ID). With PTH_CI_APP_KEY, the job reads cross-repo with an App token; without, with GITHUB_TOKEN.
+        type: string
+        default: ''
+    secrets:
+      PTH_CI_APP_KEY:
+        description: The CI GitHub App's private key. Optional; see app-id.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      HAS_APP: ${{ inputs.app-id != '' && secrets.PTH_CI_APP_KEY != '' }}
+    steps:
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      - name: Decide whether the check needs a token
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$PR" ]; then
+            echo "::notice::paired-tests: not a pull request event; nothing to check."
+            echo "needed=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash .pth-checks/scripts/paired-tests-check.sh --gate "$REPO" "$PR"
+          # The App token is limited to the repos the check reads: the handbook (pt-ref),
+          # platform-tests and the calling repo (its PR, issues and sub-issues).
+          repos=$(printf '%s\n' engineering-handbook platform-tests "${REPO#*/}" | sort -u | paste -sd, -)
+          echo "token-repos=$repos" >>"$GITHUB_OUTPUT"
+
+      - name: Mint a read-only App token
+        id: app
+        if: steps.gate.outputs.needed == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.PTH_CI_APP_KEY }}
+          owner: PlantechHubDev
+          repositories: ${{ steps.gate.outputs.token-repos }}
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+
+      - name: Check out pt-ref from the engineering handbook
+        if: steps.gate.outputs.needed == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/engineering-handbook
+          ref: ${{ inputs.handbook-ref }}
+          token: ${{ steps.app.outputs.token || github.token }}
+          sparse-checkout: tools/pt-ref
+          path: .handbook
+          persist-credentials: false
+
+      - name: Check the platform-tests line
+        if: steps.gate.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PT_REF: .handbook/tools/pt-ref/pt-ref
+        run: bash .pth-checks/scripts/paired-tests-check.sh "$REPO" "$PR"
