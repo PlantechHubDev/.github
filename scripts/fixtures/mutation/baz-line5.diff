@@ -1,0 +1,7 @@
+diff --git a/src/main/java/a/b/Baz.java b/src/main/java/a/b/Baz.java
+index 1111111..2222222 100644
+--- a/src/main/java/a/b/Baz.java
++++ b/src/main/java/a/b/Baz.java
+@@ -5,1 +5,1 @@ class Baz {
+-        return age > 5;
++        return age >= 5;

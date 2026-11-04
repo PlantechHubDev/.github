@@ -39,6 +39,10 @@ on:
         description: Exact pth-mysql-test image (ghcr.io/plantechhubdev/pth-mysql-test:<tag>) the tests need, or empty for none. Pulled with the job's GITHUB_TOKEN, so the package must grant this repo Read.
         type: string
         default: ''
+      checks-ref:
+        description: Tag of PlantechHubDev/.github whose scripts the Coverage step uses (coverage-ratchet.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
+        type: string
+        default: v2.2.0
     secrets:
       PUBLISH_TOKEN:
         description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
@@ -62,6 +66,7 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: No mavenLocal() in committed Gradle files
@@ -112,6 +117,33 @@ jobs:
           PACKAGES_USER: ${{ github.actor }}
           PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
         run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
+
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      # Coverage gate. Runs after the build and fails the job. On pull requests,
+      # at least 80% of the changed lines must be covered (diff-cover against the
+      # base branch). On every event, overall line coverage must not drop more
+      # than 0.1 points below the committed coverage-baseline file. A repo with no
+      # baseline fails here: add one (coverage-ratchet.py --write) in the PR that
+      # adopts this version.
+      - name: Coverage
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          report=build/reports/jacoco/test/jacocoTestReport.xml
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -m venv "$RUNNER_TEMP/diff-cover-venv"
+            "$RUNNER_TEMP/diff-cover-venv/bin/pip" install --quiet diff-cover==11.0.0
+            "$RUNNER_TEMP/diff-cover-venv/bin/diff-cover" "$report" --compare-branch="origin/$BASE_REF" --fail-under=80
+          fi
+          python3 .pth-checks/scripts/coverage-ratchet.py --report "$report" --format jacoco --baseline coverage-baseline
 
       - name: Upload test and coverage reports
         if: always()

@@ -1,0 +1,16 @@
+diff --git a/src/main/java/a/b/Foo.java b/src/main/java/a/b/Foo.java
+index 1111111..2222222 100644
+--- a/src/main/java/a/b/Foo.java
++++ b/src/main/java/a/b/Foo.java
+@@ -10,1 +12,1 @@ class Foo {
+-        return a + b;
++        return a + b + c;
+@@ -40,0 +50,2 @@ class Foo {
++        // docs
++        // more docs
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index 3333333..4444444 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -1,0 +12,1 @@
++key: value
