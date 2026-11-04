@@ -6,6 +6,14 @@
 
 <!-- What you ran and its result: the platform-tests run summary for a behavior change, the checker output for docs, the plan summary for infrastructure. -->
 
+## Risk
+
+<!-- Written by the agent with pth-reviewing-changes from `npm run risk:entries` in platform-tests. -->
+Risk entries: <RISK-NN (name), ... | none>
+Tier: <high | medium | low | none>
+Required layers:
+- <RISK-NN>: <layer>: <present | missing> — <test file path, run summary or reason>
+
 ## Review
 
 <!-- Written by the agent with the pth-reviewing-changes skill: keep the lines as they are. Exempt PR (docs-only, release, back-merge, Dependabot): replace this whole section with exactly `Review: not needed (<reason>)`. -->
