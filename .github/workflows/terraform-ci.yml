@@ -13,13 +13,10 @@
 #            terraform init -backend=false, terraform validate, tflint
 #            failing on errors only.
 #   live     terragrunt hclfmt --terragrunt-check per *.hcl file under
-#            plantechhub/, with the prod secrets and database units pruned,
-#            so they are never opened. No init, no module fetch.
+#            plantechhub/. No init, no module fetch.
 #
-# The exclusions are fixed here, not inputs, so a caller can't drop them:
+# The exclusion is fixed here, not an input, so a caller can't drop it:
 #   setup/ (X-007): orphaned module (no backend, no state); never plan or apply it.
-#   plantechhub/us-east-1/prod/secrets and .../prod/database (X-003, X-004):
-#   committed plaintext values; never open them.
 #
 # The caller keeps its own ci-ok job; no job here is named ci-ok.
 
@@ -127,10 +124,8 @@ jobs:
 
       - name: hclfmt check, format only (no init, no module fetch, no credentials)
         if: inputs.mode == 'live'
-        # Per file, never per directory, so the pruned units are never opened.
-        # Lock files are generated.
+        # Per file. Lock files are generated.
         run: |
           find plantechhub \
-            \( -path 'plantechhub/us-east-1/prod/secrets' -o -path 'plantechhub/us-east-1/prod/database' \) -prune -o \
             -type f -name '*.hcl' ! -name '.terraform.lock.hcl' -print0 |
             xargs -0 -n1 terragrunt hclfmt --terragrunt-check --terragrunt-hclfmt-file
