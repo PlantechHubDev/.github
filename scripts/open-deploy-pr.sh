@@ -27,15 +27,16 @@
 # "unparseable" when the unit has not exactly one image line of the form above. It reads git only
 # (no AWS). release-image.sh reads this list and leaves :master alone while any unit pins :master
 # or is unparseable (ECR replication would move :master in every region). Exit 0, or 2 when the
-# service has no prod unit.
+# service has no prod unit or PROD_UNIT is not one of the matched units (the deploy PR edits
+# PROD_UNIT, so the :master guard must see its pin).
 #
 # Output: stdout carries only the PR URL (nothing when there is no PR); messages go to stderr.
 # When GITHUB_STEP_SUMMARY is set, a line is added there: the PR, "already pinned", and any older
 # deploy PR that could not be closed.
 #
 # Environment:
-#   PROD_UNIT         path of the unit the deploy PR edits (required, except with --pins): the
-#                     caller's input prod-unit
+#   PROD_UNIT         path of the unit the deploy PR edits (required): the caller's input
+#                     prod-unit. --pins exits 2 unless it is one of the matched units
 #   PROD_UNITS_PATTERN  ERE over `git ls-tree -r --name-only` paths that matches every prod unit
 #                     of the service (required with --pins): the caller's input prod-units-pattern
 #                     Both must be non-empty and relative (no leading /), with no "..".
@@ -106,12 +107,9 @@ relpath() {
   [[ $v != /* && $v != ^/* ]] || usage "$1 must be a relative path (got '$2')"
   [[ $v != *..* ]] || usage "$1 must not contain '..' (got '$2')"
 }
-if $pins_mode; then
-  relpath PROD_UNITS_PATTERN "${PROD_UNITS_PATTERN:-}"
-else
-  relpath PROD_UNIT "${PROD_UNIT:-}"
-  UNIT=$PROD_UNIT
-fi
+relpath PROD_UNIT "${PROD_UNIT:-}"
+UNIT=$PROD_UNIT
+$pins_mode && relpath PROD_UNITS_PATTERN "${PROD_UNITS_PATTERN:-}"
 if ! $pins_mode && ! $base_mode; then
   [[ ${INFRA_REPO:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || usage "INFRA_REPO must be <owner>/<name> of the infrastructure repo (got '${INFRA_REPO:-}')"
   REPO=$INFRA_REPO
@@ -142,6 +140,9 @@ Gn fetch -q origin master 2>"$tmp/err" || die "cannot fetch origin master: $(hea
 if $pins_mode; then
   units=$(git ls-tree -r --name-only origin/master | grep -E -- "$PROD_UNITS_PATTERN")
   [ -n "$units" ] || die2 "no prod unit of $svc on origin master matches PROD_UNITS_PATTERN '$PROD_UNITS_PATTERN'"
+  # The deploy PR edits PROD_UNIT, so the :master guard must see it: a pattern that misses it is
+  # a caller error, never a shorter list.
+  grep -qxF -- "$PROD_UNIT" <<<"$units" || die2 "PROD_UNIT $PROD_UNIT is not among the prod units PROD_UNITS_PATTERN '$PROD_UNITS_PATTERN' matches on origin master: the pattern must match every prod unit of $svc, in every region"
   while IFS= read -r u; do
     # parse_pin exits on a bad unit; the subshell turns that into "unparseable" (fail closed).
     pin=$(git show "origin/master:$u" > "$tmp/u.hcl" 2>/dev/null &&

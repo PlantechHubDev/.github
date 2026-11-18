@@ -82,7 +82,7 @@ on:
         type: string
         required: true
       prod-units-pattern:
-        description: ERE matched against the infrastructure repo's `git ls-tree -r --name-only` paths that lists every prod unit of the service, in every region. Pass it from a variable.
+        description: ERE matched against the infrastructure repo's `git ls-tree -r --name-only` paths that lists every prod unit of the service, in every region (prod-unit included, or the release fails). Pass it from a variable.
         type: string
         required: true
     secrets:

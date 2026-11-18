@@ -273,7 +273,9 @@ PROD_UNITS_PATTERN='' run "inputs: --pins needs PROD_UNITS_PATTERN" 64 --pins $S
 has "inputs: says PROD_UNITS_PATTERN is needed" "$out" "PROD_UNITS_PATTERN"
 PROD_UNITS_PATTERN="^live/\.\./prod/$SVC/terragrunt\\.hcl\$" run "inputs: pattern with .. exits 64" 64 --pins $SVC
 PROD_UNITS_PATTERN="^/live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" run "inputs: absolute pattern exits 64" 64 --pins $SVC
-PROD_UNIT='' INFRA_REPO='' run "inputs: --pins needs neither PROD_UNIT nor INFRA_REPO" 0 --pins $SVC
+PROD_UNIT='' run "inputs: --pins needs PROD_UNIT" 64 --pins $SVC
+has "inputs: --pins says PROD_UNIT is needed" "$out" "PROD_UNIT"
+INFRA_REPO='' run "inputs: --pins does not need INFRA_REPO" 0 --pins $SVC
 
 # --- --base-digest: the digest prod is pinned to on origin master (before the retag)
 setup terragrunt-digest.hcl
@@ -323,6 +325,17 @@ setup terragrunt-digest.hcl
 G -C "$W" rm -q -r live; G -C "$W" commit -q -m "chore: drop"; G -C "$W" push -q origin master
 run "pins: no prod unit exits 2" 2 --pins $SVC
 run "pins: usage" 64 --pins
+
+# --- the deploy PR's unit must be one of the matched prod units: a pattern that misses PROD_UNIT
+# (here pinning :master) must not let release-image.sh retag :master.
+setup terragrunt-master.hcl
+add_unit "$WEST" terragrunt-digest.hcl
+PROD_UNITS_PATTERN="^live/region-b/prod/$SVC/terragrunt\\.hcl\$" run "pins: PROD_UNIT not matched by the pattern exits 2" 2 --pins $SVC
+has "pins: names the unmatched PROD_UNIT" "$out" "$UNIT"
+is "pins: unmatched PROD_UNIT prints no units" "$so" ""
+: > "$AWS_LOG"
+pipe=$( (cd "$W" && PROD_UNITS_PATTERN="^live/region-b/prod/$SVC/terragrunt\\.hcl\$" bash "$HERE/open-deploy-pr.sh" --pins $SVC) | FAKE_TAG_DIGEST=$A FAKE_SRC_DIGEST=$A GITHUB_OUTPUT=$T/out bash "$HERE/release-image.sh" $SVC "$MERGE" 2>&1)
+nologs "pins | release-image: unmatched PROD_UNIT, no put-image" "$AWS_LOG" "put-image"
 
 # --- sim-run-url.sh: the merge_group run of the caller's CI workflow for the merged commit
 sim() { : > "$GH_LOG"; out=$(bash "$HERE/sim-run-url.sh" "$@" 2>/dev/null); code=$?; }
