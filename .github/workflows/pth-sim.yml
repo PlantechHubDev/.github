@@ -1,0 +1,76 @@
+# Prod simulation in the merge queue: the full platform-tests suite on the queue image of one
+# service, against the images prod is running now. Runs on the developer's Mac (self-hosted
+# runner with labels self-hosted + pth-test) because it needs the pth-test stack, Docker and the
+# developer's read-only AWS SSO session. Called from a trunk repo's queue CI as a job of the
+# ci-ok gate, after the image job:
+#
+#   pth-sim:
+#     needs: image
+#     uses: PlantechHubDev/.github/.github/workflows/pth-sim.yml@vX.Y.Z
+#     permissions:
+#       contents: read
+#     with:
+#       service-name: orchestration-service
+#       digest: ${{ needs.image.outputs.digest }}
+#       checks-ref: vX.Y.Z   # the same tag, so the job runs this tag's scripts
+#
+# The work is scripts/pth-sim.sh (covered by scripts/test-pth-sim.sh), which mirrors the
+# handbook's pt-verify block (engineering-handbook testing.md, <!-- cmd:pt-verify -->). It reads
+# the running prod digest from ECS and resolves it to a commit (scripts/deployed-sha.sh), picks
+# the platform-tests commit with pt-ref --release <deployed>..<queue commit>, leases a pth-test
+# stack and runs env:up --prod-fleet --image <short>=<registry>/<service>@<digest>, then npm test.
+# Exit codes: 0 pass, 1 simulation failed, 2 resolver/setup error, 3 more than one paired
+# platform-tests change (split the release), 4 AWS SSO expired (run aws sso login), 64 usage.
+#
+# The runner's environment MUST set DEV (the workspace dev dir holding engineering-handbook and
+# platform-tests) and MAY set PTH_AWS_PROFILE (default pth-admin-prod). GitHub reads (pt-ref,
+# commit lookup) use the developer's gh login on the Mac; AWS reads use the SSO profile. No
+# secrets or AWS identifiers are passed from here.
+
+name: pth-sim
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: The service's repo and ECR repository name, e.g. orchestration-service.
+        type: string
+        required: true
+      digest:
+        description: The queue image digest (sha256:<64 hex>), from java-service-image.yml's digest output.
+        type: string
+        required: true
+      checks-ref:
+        description: Ref (normally the same tag as the uses line) to check out PlantechHubDev/.github at, for scripts/*.sh.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  pth-sim:
+    name: pth-sim
+    runs-on: [self-hosted, pth-test]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      # One pth-test stack per session (decision 0106); each run attempt is its own session.
+      PTH_STACK_SESSION: gh-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out the shared scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      # github.sha is the queue commit in a merge_group run.
+      - name: Simulate prod on the queue image
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          DIGEST: ${{ inputs.digest }}
+          QUEUE_SHA: ${{ github.sha }}
+        run: bash .pth-checks/scripts/pth-sim.sh "$SERVICE" "$DIGEST" "$QUEUE_SHA"

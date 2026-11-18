@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Stub of the handbook's pth-stack library (tools/bin/pth-stack), sourced by pth-sim.sh through
+# PTH_STACK_LIB in scripts/test-pth-sim.sh. Same functions, no locks: it logs to $STACK_LOG.
+#   FAKE_STACK_BUSY=1   pth_stack_try returns 75 (none free); pth_stack_take then blocks for
+#                       FAKE_STACK_WAIT seconds (default 1) and gives up with exit 75, standing
+#                       in for a lease that never comes before the job's timeout.
+#   FAKE_STACK_REFUSE=1 the per-session refusal: try returns 2, take exits 2.
+# On a lease it exports PTH_STACK=1 and sets an EXIT trap that calls pth_stack_down (when the
+# caller defines it) and logs "released <rc>", as the real library's exit cleanup does.
+# shellcheck disable=SC2329  # functions are called by the sourcing script
+_stub_lease() {
+  export PTH_STACK=1
+  echo "leased" >> "${STACK_LOG:?}"
+  trap '_stub_release $?' EXIT
+}
+_stub_release() {
+  if command -v pth_stack_down >/dev/null; then pth_stack_down; fi
+  echo "released $1" >> "$STACK_LOG"
+}
+pth_stack_try() {
+  echo "try" >> "${STACK_LOG:?}"
+  [ "${FAKE_STACK_REFUSE:-0}" = 1 ] && return 2
+  [ "${FAKE_STACK_BUSY:-0}" = 1 ] && return 75
+  _stub_lease
+}
+pth_stack_take() {
+  echo "take" >> "${STACK_LOG:?}"
+  [ "${FAKE_STACK_REFUSE:-0}" = 1 ] && exit 2
+  if [ "${FAKE_STACK_BUSY:-0}" = 1 ]; then sleep "${FAKE_STACK_WAIT:-1}"; echo "stub: no stack before the timeout" >&2; exit 75; fi
+  _stub_lease
+}
+pth_stack_phase() { echo "phase $1" >> "${STACK_LOG:?}"; }
+pth_stack_exit() { exit "$1"; }
