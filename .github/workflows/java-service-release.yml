@@ -1,9 +1,12 @@
 # Release a trunk service after its merge queue merged: nothing is rebuilt. In the queue,
 # java-service-image.yml pushed the queue commit as <service>:sha-<7> and pth-sim.yml simulated
 # prod on it; the queue then fast-forwards master to that exact commit, so on push to master
-# github.sha is the simulated commit. This workflow tags that image master (same manifest, same
-# digest) and has the CI GitHub App open a deploy PR in PlantechHubDev/infrastructure-live that
-# pins the digest in the prod unit. Deploying stays a human merge of that PR.
+# github.sha is the simulated commit. This workflow has the CI GitHub App open a deploy PR in
+# PlantechHubDev/infrastructure-live that pins that image's digest in the prod unit, and tags the
+# image master (same manifest, same digest) only when prod does not pin :master. Deploying stays
+# a human merge of that PR: while a unit pins :master, moving :master would put an unapproved
+# image into prod at the next task restart, so :master is left alone (with a warning) until the
+# unit pins a digest.
 #
 #   on:
 #     push:
@@ -24,11 +27,13 @@
 #       secrets:
 #         app-key: ${{ secrets.PTH_CI_APP_KEY }}
 #
-# Steps, in order: read the digest infrastructure-live master pins now (a tag pin is resolved in
-# ECR before the retag moves it; it becomes the PR's rollback digest) -> retag sha-<7> as master
-# (scripts/ecr-retag.sh; a missing sha-<7> image fails the run and opens no PR) -> find the
-# simulation run (scripts/sim-run-url.sh) -> open the deploy PR (scripts/open-deploy-pr.sh).
-# The scripts are covered by scripts/test-ecr-retag.sh and scripts/test-open-deploy-pr.sh.
+# Steps, in order: read what infrastructure-live master pins now (open-deploy-pr.sh --base-digest:
+# the digest, which becomes the PR's rollback digest, and whether it is a digest or a tag) ->
+# pick the sha-<7> digest and retag it master unless the pin is :master (scripts/release-image.sh;
+# a missing sha-<7> image fails the run and opens no PR) -> find the simulation run
+# (scripts/sim-run-url.sh) -> open the deploy PR (scripts/open-deploy-pr.sh, which also writes the
+# step summary). The scripts are covered by scripts/test-ecr-retag.sh and
+# scripts/test-open-deploy-pr.sh.
 #
 # Tokens: the CI App token, limited to infrastructure-live (contents + pull requests write), for
 # that clone, the branch push, the PR and closing older deploy PRs; the commit is made as the
@@ -140,25 +145,27 @@ jobs:
           role-to-assume: ${{ inputs.role-to-assume }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Before the retag: a :master pin must be read while :master is still the deployed image.
-      - name: Read the digest prod is pinned to (rollback digest)
+      # Before any retag: the pinned digest (rollback digest) and the pin kind (digest or tag:<name>).
+      - name: Read what prod is pinned to
         id: base
         working-directory: infra
         env:
           SERVICE: ${{ inputs.service-name }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
-          BASE=$(bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --base-digest "$SERVICE") || exit 1
-          echo "Rollback digest: $BASE"
+          read -r BASE PIN < <(bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --base-digest "$SERVICE") || exit 1
+          [[ $BASE =~ ^sha256:[0-9a-f]{64}$ && $PIN =~ ^(digest|tag:[A-Za-z0-9_.-]+)$ ]] || { echo "::error::cannot read the prod pin (got '$BASE' '$PIN')"; exit 1; }
+          echo "Rollback digest: $BASE (pin: $PIN)"
           echo "digest=$BASE" >> "$GITHUB_OUTPUT"
+          echo "pin=$PIN" >> "$GITHUB_OUTPUT"
 
-      - name: Tag the simulated image master (no rebuild)
+      # Writes digest= to GITHUB_OUTPUT; skips the retag (with a warning) while prod pins :master.
+      - name: Pick the simulated image; tag it master unless prod pins master
         id: retag
         env:
           SERVICE: ${{ inputs.service-name }}
-        run: |
-          DIGEST=$(bash .pth-checks/scripts/ecr-retag.sh "$SERVICE" "sha-${GITHUB_SHA::7}" master) || exit 1
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          PIN: ${{ steps.base.outputs.pin }}
+        run: bash .pth-checks/scripts/release-image.sh "$SERVICE" "$GITHUB_SHA" "$PIN"
 
       - name: Find the simulation run
         id: sim
@@ -192,7 +199,11 @@ jobs:
           DEPLOY_GIT_EMAIL: ${{ steps.bot.outputs.email }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SERVICE_GH_TOKEN: ${{ github.token }}
+        # The script writes the step summary: the PR, "already pinned" (no PR, empty stdout), or an
+        # older deploy PR it could not close (exit 1, with the new PR still open).
         run: |
-          URL=$(SERVICE_REPO="$GITHUB_WORKSPACE/service" bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" "$SERVICE" "$DIGEST" "$GITHUB_SHA" "$SIM_URL") || exit 1
-          echo "Deploy PR: $URL"
-          echo "Deploy PR for $SERVICE ${GITHUB_SHA::7}: $URL" >> "$GITHUB_STEP_SUMMARY"
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no valid image digest from the previous step (got '$DIGEST')"; exit 1; }
+          rc=0
+          URL=$(SERVICE_REPO="$GITHUB_WORKSPACE/service" bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" "$SERVICE" "$DIGEST" "$GITHUB_SHA" "$SIM_URL") || rc=$?
+          if [ -n "$URL" ]; then echo "Deploy PR: $URL"; else echo "No deploy PR opened"; fi
+          exit "$rc"

@@ -10,19 +10,26 @@
 # "deploy(<service>): <sha7>". The body lists the service PRs ("Merge pull request #N" commits on
 # the first-parent history <deployed>..<merge-sha>), the simulation link (or the text "simulation
 # run: not found") and "Rollback digest: <digest master pins now>". Every other open PR whose head
-# is deploy/<service>-<7 hex> is closed with a comment naming the new PR.
+# is deploy/<service>-<7 hex> in infrastructure-live itself (never a fork's) is closed with a
+# comment naming the new PR.
 # A re-run reuses the branch (adds a commit only if the pin differs; never force-pushes) and the
 # open PR on it (body updated). If origin master already pins <digest>, it does nothing.
 #
-# --base-digest prints the digest origin master pins now: the digest itself, or for a tag pin
-# (e.g. :master) that tag's digest in ECR. Call it BEFORE the retag moves :master and pass the
-# result as BASE_DIGEST.
+# --base-digest prints "<digest> <pin>" for what origin master pins now: "<digest> digest" for a
+# digest pin, or "<tag's digest in ECR> tag:<tag>" for a tag pin (e.g. :master). Call it before any
+# retag; pass the digest as BASE_DIGEST and the pin to release-image.sh (which then leaves a
+# pinned :master alone).
+#
+# Output: stdout carries only the PR URL (nothing when there is no PR); messages go to stderr.
+# When GITHUB_STEP_SUMMARY is set, a line is added there: the PR, "already pinned", and any older
+# deploy PR that could not be closed.
 #
 # Environment:
 #   SERVICE_REPO      path to a full-history checkout of PlantechHubDev/<service> (required)
 #   BASE_DIGEST       the rollback digest, required when master pins a tag rather than a digest
 #   DEPLOY_GIT_NAME   commit identity: the CI App's bot, e.g. "<app-slug>[bot]"           (required
 #   DEPLOY_GIT_EMAIL  "<bot user id>+<app-slug>[bot]@users.noreply.github.com"              unless DRY_RUN)
+#   GITHUB_STEP_SUMMARY  optional; see Output above
 #   GH_TOKEN          token for infrastructure-live (git fetch/push through gh's credential
 #                     helper, PR list/create/edit/close): the CI App token
 #   SERVICE_GH_TOKEN  token deployed-sha.sh uses to read the service's commits (default GH_TOKEN)
@@ -49,6 +56,7 @@ usage() {
 }
 die()  { echo "open-deploy-pr: $*" >&2; exit 1; }
 die2() { echo "open-deploy-pr: $*" >&2; exit 2; }
+summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
 # Network git: credentials from gh (GH_TOKEN), since the checkout keeps none.
 Gn() { git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 
@@ -97,10 +105,10 @@ git show "origin/master:$UNIT" > "$tmp/master.hcl" 2>/dev/null || die2 "$UNIT no
 parse_pin "$tmp/master.hcl"
 
 if $base_mode; then
-  if [ -n "$PIN_DIGEST" ]; then echo "$PIN_DIGEST"; exit 0; fi
+  if [ -n "$PIN_DIGEST" ]; then echo "$PIN_DIGEST digest"; exit 0; fi
   d=$(bash "$HERE/ecr-existing-digest.sh" "$svc" "$PIN_TAG") || die "cannot read $svc:$PIN_TAG in ECR"
   [ -n "$d" ] || die2 "$svc:$PIN_TAG (pinned on master) is not in ECR"
-  echo "$d"; exit 0
+  echo "$d tag:$PIN_TAG"; exit 0
 fi
 
 sha7=${merge:0:7}
@@ -108,7 +116,8 @@ BR=deploy/$svc-$sha7
 TITLE="deploy($svc): $sha7"
 new_val=$PIN_IMAGE@$digest
 if [ "$PIN_VAL" = "$new_val" ]; then
-  echo "open-deploy-pr: origin master already pinned to $new_val; nothing to deploy"
+  echo "open-deploy-pr: origin master already pinned to $new_val; nothing to deploy" >&2
+  summary "$svc $sha7: infrastructure-live master is already pinned to $digest; no deploy PR."
   exit 0
 fi
 if [ -n "$PIN_DIGEST" ]; then
@@ -177,11 +186,14 @@ cat "$tmp/unit.hcl" > "$UNIT"
 changed=true
 git diff --quiet -- "$UNIT" && changed=false
 
-open=$(gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,url) || die "cannot list open PRs in $REPO"
+# Only PRs whose head branch lives in infrastructure-live itself; a fork's PR is never ours.
+open=$(gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,url,isCrossRepository,headRepositoryOwner) || die "cannot list open PRs in $REPO"
+open=$(jq --arg o "${REPO%%/*}" '[.[] | select((.isCrossRepository // false) == false and ((.headRepositoryOwner.login // $o) == $o))]' <<<"$open") || die "cannot read the open PR list"
 own=$(jq -r --arg b "$BR" '[.[] | select(.headRefName == $b)][0] | if . then "\(.number) \(.url)" else empty end' <<<"$open") || die "cannot read the open PR list"
 older=$(jq -r --arg b "$BR" --arg re "^deploy/$svc-[0-9a-f]{7}\$" '.[] | select((.headRefName | test($re)) and .headRefName != $b) | .number' <<<"$open") || die "cannot read the open PR list"
 
 if [ "${DRY_RUN:-}" = 1 ]; then
+  exec >&2   # stdout carries only a PR URL, and a dry run opens none
   echo "DRY RUN: nothing is pushed, created, edited or closed"
   echo "branch: $BR ($(if $existed; then echo exists on origin; else echo new from origin/master; fi))"
   echo "--- diff"
@@ -212,10 +224,14 @@ else
   url=$(gh pr create -R "$REPO" --base master --head "$BR" --title "$TITLE" --body-file "$body") || die "cannot create the PR for $BR"
 fi
 
+summary "Deploy PR for $svc $sha7: $url"
 failed=0
 for n in $older; do
-  gh pr close "$n" -R "$REPO" --comment "Superseded by $url" >/dev/null \
-    || { echo "open-deploy-pr: cannot close older deploy PR #$n" >&2; failed=1; }
+  if ! gh pr close "$n" -R "$REPO" --comment "Superseded by $url" >/dev/null; then
+    echo "open-deploy-pr: cannot close older deploy PR #$n" >&2
+    summary "The deploy PR $url is open, but the older deploy PR #$n in $REPO could not be closed: close it by hand."
+    failed=1
+  fi
 done
 echo "$url"
 exit $failed

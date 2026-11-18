@@ -11,8 +11,8 @@ export PATH="$FIX/bin:$PATH"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # An empty global git config, so the developer's signing or hooks never reach these repos.
 : > "$T/gitconfig"; export GIT_CONFIG_GLOBAL=$T/gitconfig GIT_CONFIG_NOSYSTEM=1
-export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log GH_BODY=$T/body.md
-unset FAKE_OPEN_PRS FAKE_GH_CREATE_EXIT FAKE_RUNS FAKE_RUNS_EXIT FAKE_TAG_DIGEST FAKE_AWS_DENIED BASE_DIGEST DRY_RUN SERVICE_GH_TOKEN INFRA_REPO
+export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log GH_BODY=$T/body.md GITHUB_STEP_SUMMARY=$T/summary.md
+unset FAKE_OPEN_PRS FAKE_GH_CREATE_EXIT FAKE_GH_CLOSE_EXIT FAKE_RUNS FAKE_RUNS_EXIT FAKE_TAG_DIGEST FAKE_AWS_DENIED BASE_DIGEST DRY_RUN SERVICE_GH_TOKEN INFRA_REPO
 
 SVC=orchestration-service
 UNIT=plantechhub/us-east-1/prod/$SVC/terragrunt.hcl
@@ -59,11 +59,13 @@ setup() {
   G clone -q --bare "$seed" "$O"
   G clone -q "$O" "$W"
 }
-# run <name> <want-exit> <args...>: open-deploy-pr.sh in $W with fresh logs; stdout+stderr in $out.
+# run <name> <want-exit> <args...>: open-deploy-pr.sh in $W with fresh logs; stdout in $so,
+# stdout+stderr in $out.
 run() {
   local name=$1 want=$2; shift 2
-  : > "$AWS_LOG"; : > "$GH_LOG"; rm -f "$GH_BODY"
-  out=$(cd "$W" && bash "$HERE/open-deploy-pr.sh" "$@" 2>&1); code=$?
+  : > "$AWS_LOG"; : > "$GH_LOG"; : > "$GITHUB_STEP_SUMMARY"; rm -f "$GH_BODY"
+  (cd "$W" && bash "$HERE/open-deploy-pr.sh" "$@" >"$T/stdout" 2>"$T/stderr"); code=$?
+  so=$(cat "$T/stdout"); out=$so$'\n'$(cat "$T/stderr")
   if [ "$code" = "$want" ]; then pass "$name"; else fail "$name" "exit $code want $want; output: $out"; fi
 }
 has()    { if [[ $2 == *"$3"* ]]; then pass "$1"; else fail "$1" "lacks '$3': $2"; fi; }
@@ -88,7 +90,8 @@ is  "master form: commit body is empty (no attribution)" "$(git -C "$O" log -1 -
 is  "master form: commit author is the App bot" "$(git -C "$O" log -1 --format='%an <%ae>' "$BR")" "pth-ci[bot] <1+pth-ci[bot]@users.noreply.github.com>"
 is  "master form: committer is the App bot" "$(git -C "$O" log -1 --format='%cn' "$BR")" "pth-ci[bot]"
 logs "master form: PR created into master on the deploy branch" "$GH_LOG" "pr create -R PlantechHubDev/infrastructure-live --base master --head $BR --title deploy($SVC): $S7"
-has "master form: prints the PR URL" "$out" "$NEW_URL"
+is  "master form: stdout is only the PR URL" "$so" "$NEW_URL"
+logs "master form: step summary names the PR" "$GITHUB_STEP_SUMMARY" "$NEW_URL"
 has "body: rollback digest is the old pin" "$(body)" "Rollback digest: $C"
 has "body: names the new image by digest" "$(body)" "000000000000.dkr.ecr.us-east-1.amazonaws.com/$SVC@$A"
 has "body: simulation link" "$(body)" "$SIM"
@@ -107,7 +110,8 @@ nologs "rollback equals new digest: no PR" "$GH_LOG" "pr create"
 no_branch "rollback equals new digest: nothing pushed"
 W=$T/work-1 O=$T/origin-1.git
 
-# --- re-run: the branch and its PR exist; reuse them, add no commit, close nothing of ours
+# --- re-run with a :master pin (the retag was skipped, so :master and BASE_DIGEST are unchanged):
+# idempotent, it reuses the branch and the PR, adds no commit, closes nothing of ours
 G clone -q "$O" "$T/work-rerun"; W=$T/work-rerun
 FAKE_OPEN_PRS="[{\"number\":8,\"headRefName\":\"$BR\",\"url\":\"$NEW_URL\"}]" BASE_DIGEST=$C run "re-run: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
 is  "re-run: still one commit on the branch" "$(git -C "$O" rev-list --count "master..$BR")" 1
@@ -115,6 +119,7 @@ nologs "re-run: no second PR" "$GH_LOG" "pr create"
 logs "re-run: existing PR body updated" "$GH_LOG" "pr edit 8 -R PlantechHubDev/infrastructure-live"
 nologs "re-run: own PR not closed" "$GH_LOG" "pr close 8"
 has "re-run: body written" "$(body)" "Rollback digest: $C"
+is  "re-run: stdout is the existing PR URL" "$so" "$NEW_URL"
 
 # --- re-run where the branch holds another commit: it is reused and fast-forwarded
 setup terragrunt-master.hcl
@@ -141,6 +146,25 @@ nologs "supersede: other service's PR untouched" "$GH_LOG" "pr close 6"
 nologs "supersede: longer service name with the same prefix untouched" "$GH_LOG" "pr close 7"
 nologs "supersede: non-deploy branch untouched" "$GH_LOG" "pr close 9"
 
+# --- PRs from forks are never closed or reused, even on a deploy/ branch name
+setup terragrunt-digest.hcl
+FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"}},
+ {"number":8,"headRefName":"'"$BR"'","url":"u8","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"}},
+ {"number":4,"headRefName":"deploy/orchestration-service-def5678","url":"u4","isCrossRepository":false,"headRepositoryOwner":{"login":"PlantechHubDev"}}]' \
+  run "fork: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
+nologs "fork: fork PR on an older deploy branch not closed" "$GH_LOG" "pr close 5"
+nologs "fork: fork PR on this branch name not reused" "$GH_LOG" "pr edit 8"
+logs "fork: our own PR is created instead" "$GH_LOG" "pr create"
+logs "fork: same-repo older deploy PR still closed" "$GH_LOG" "pr close 4 "
+
+# --- closing an older PR fails: exit 1, the new PR is open and the summary says which failed
+setup terragrunt-digest.hcl
+FAKE_GH_CLOSE_EXIT=1 FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5"}]' \
+  run "close failure: exits 1" 1 $SVC "$A" "$MERGE" "$SIM"
+is  "close failure: stdout still the new PR URL" "$so" "$NEW_URL"
+logs "close failure: summary names the open PR" "$GITHUB_STEP_SUMMARY" "$NEW_URL"
+logs "close failure: summary names the PR not closed" "$GITHUB_STEP_SUMMARY" "#5"
+
 # --- no image line: exit 2, nothing opened or pushed
 setup terragrunt-noimage.hcl
 BASE_DIGEST=$C run "no image line: exits 2" 2 $SVC "$A" "$MERGE" "$SIM"
@@ -159,6 +183,8 @@ BASE_DIGEST=$C run "unit file missing: exits 2" 2 $SVC "$A" "$MERGE" "$SIM"
 setup terragrunt-expected.hcl
 run "already pinned: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
 has "already pinned: says so" "$out" "already pinned"
+is  "already pinned: nothing on stdout" "$so" ""
+logs "already pinned: step summary says no PR" "$GITHUB_STEP_SUMMARY" "already pinned"
 nologs "already pinned: no PR" "$GH_LOG" "pr create"
 no_branch "already pinned: nothing pushed"
 
@@ -207,11 +233,11 @@ no_branch "usage: nothing pushed"
 # --- --base-digest: the digest prod is pinned to on origin master (before the retag)
 setup terragrunt-digest.hcl
 run "base: digest form exits 0" 0 --base-digest $SVC
-is "base: digest form prints the pinned digest" "$out" "$C"
+is "base: digest form prints the pinned digest and the pin kind" "$so" "$C digest"
 nologs "base: digest form needs no aws" "$AWS_LOG" "ecr"
 setup terragrunt-master.hcl
 FAKE_TAG_DIGEST=$C run "base: tag form exits 0" 0 --base-digest $SVC
-is "base: tag form prints the tag's digest" "$out" "$C"
+is "base: tag form prints the tag's digest and the tag" "$so" "$C tag:master"
 logs "base: tag resolved in ECR" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageTag=master"
 run "base: tag not in ECR exits 2" 2 --base-digest $SVC
 FAKE_AWS_DENIED=1 run "base: aws failure exits 1" 1 --base-digest $SVC

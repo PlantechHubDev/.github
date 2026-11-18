@@ -6,7 +6,7 @@
 #   pr create ... --body-file F            copies F to $GH_BODY, prints $FAKE_NEW_PR_URL
 #   pr edit N ... --body-file F            copies F to $GH_BODY
 #   pr close N ...                         exits 0
-# FAKE_GH_CREATE_EXIT makes pr create fail with that code.
+# FAKE_GH_CREATE_EXIT / FAKE_GH_CLOSE_EXIT make pr create / pr close fail with that code.
 echo "$*" >> "${GH_LOG:-/dev/null}"
 body_file() { while [ $# -gt 0 ]; do if [ "$1" = --body-file ]; then cp "$2" "${GH_BODY:?}"; return; fi; shift; done; }
 case "$1 $2" in
@@ -19,6 +19,6 @@ case "$1 $2" in
     [ -z "${FAKE_GH_CREATE_EXIT:-}" ] || { echo "gh: create failed" >&2; exit "$FAKE_GH_CREATE_EXIT"; }
     body_file "$@"; echo "${FAKE_NEW_PR_URL:?}" ;;
   "pr edit") body_file "$@" ;;
-  "pr close") : ;;
+  "pr close") [ -z "${FAKE_GH_CLOSE_EXIT:-}" ] || { echo "gh: close failed" >&2; exit "$FAKE_GH_CLOSE_EXIT"; } ;;
   *) echo "fake gh: unexpected call: $*" >&2; exit 99 ;;
 esac

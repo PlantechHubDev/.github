@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests ecr-retag.sh (copy the manifest of <service>:<from-tag> to <to-tag>, no rebuild) with the
-# fake aws in scripts/fixtures/deploy-pr/bin first on PATH, so nothing touches AWS.
+# Tests ecr-retag.sh (copy the manifest of <service>:<from-tag> to <to-tag>, no rebuild) and
+# release-image.sh (retag sha-<7> as master only when prod does not pin :master) with the fake aws in scripts/fixtures/deploy-pr/bin first on PATH, so nothing touches AWS.
 # Usage: bash scripts/test-ecr-retag.sh   (exit 0 when every case passes)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -9,7 +9,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export AWS_LOG=$T/aws.log
 A=sha256:$(printf 'a%.0s' $(seq 64))
 export FAKE_SRC_DIGEST=$A
-unset FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_AWS_DENIED
+unset FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_AWS_DENIED FAKE_TAG_DIGEST GITHUB_OUTPUT
 SVC=orchestration-service
 status=0
 
@@ -54,4 +54,37 @@ run "usage: two args" 64 $SVC sha-abc1234
 run "usage: bad service" 64 "Orch/x" sha-abc1234 master
 run "usage: bad tag" 64 $SVC "sha abc" master
 empty "usage: no aws call" "$AWS_LOG"
+
+# --- release-image.sh <service> <merge-sha> <pin>: the digest to deploy, retagging only when safe
+MERGE=abc1234$(printf '0%.0s' $(seq 33))
+export GITHUB_OUTPUT=$T/output
+rel() {
+  local name=$1 want=$2; shift 2
+  : > "$AWS_LOG"; : > "$GITHUB_OUTPUT"
+  out=$(bash "$HERE/release-image.sh" "$@" 2>"$T/err"); code=$?; err=$(cat "$T/err")
+  if [ "$code" = "$want" ]; then pass "$name"; else fail "$name" "exit $code want $want; stdout '$out' stderr '$err'"; fi
+}
+FAKE_TAG_DIGEST=$A rel "master pin: exits 0" 0 $SVC "$MERGE" tag:master
+nologs "master pin: :master not moved (no put-image)" "$AWS_LOG" "put-image"
+logs "master pin: sha-<7> digest read read-only" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageTag=sha-abc1234"
+has  "master pin: warns that prod pins :master" "$out" "::warning::"
+has  "master pin: warning names :master" "$out" "pins :master"
+is   "master pin: digest is the last line" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
+logs "master pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
+rel "master pin, sha-<7> missing: exits 2" 2 $SVC "$MERGE" tag:master
+has "master pin, missing: says so" "$err" "sha-abc1234"
+nologs "master pin, missing: no digest output" "$GITHUB_OUTPUT" "digest="
+rel "digest pin: exits 0" 0 $SVC "$MERGE" digest
+logs "digest pin: retagged sha-<7> as master" "$AWS_LOG" "ecr put-image --repository-name $SVC --image-tag master"
+logs "digest pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
+hasnt() { if [[ $2 == *"$3"* ]]; then fail "$1" "has '$3': $2"; else pass "$1"; fi; }
+hasnt "digest pin: no warning" "$out" "::warning::"
+rel "other tag pin: exits 0" 0 $SVC "$MERGE" tag:latest
+logs "other tag pin: retagged" "$AWS_LOG" "put-image"
+FAKE_SRC_MISSING=1 rel "digest pin, sha-<7> missing: exits 2" 2 $SVC "$MERGE" digest
+nologs "digest pin, missing: no put-image" "$AWS_LOG" "put-image"
+nologs "digest pin, missing: no digest output" "$GITHUB_OUTPUT" "digest="
+rel "usage: bad pin" 64 $SVC "$MERGE" master
+rel "usage: short sha" 64 $SVC abc1234 digest
+rel "usage: no args" 64
 exit $status
