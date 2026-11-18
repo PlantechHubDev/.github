@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Fake gh for test-pth-sim.sh and test-deployed-sha.sh. Logs argv (one line) to $GH_LOG.
+# `gh api repos/<org>/<repo>/git/ref/heads/<branch>` prints a ref JSON (exit 0), or with
+# FAKE_REF_EXIT set prints $FAKE_REF_ERR on stderr and exits with it.
 # `gh api repos/<org>/<repo>/commits/<ref> ...` prints $FAKE_COMMIT (the --jq .sha result)
 # and exits 0, unless FAKE_GH_EXIT is set: then it prints $FAKE_GH_ERR on stderr and exits with it.
 echo "$*" >> "${GH_LOG:-/dev/null}"
 if [ -n "${FAKE_GH_EXIT:-}" ]; then echo "${FAKE_GH_ERR:-gh: error}" >&2; exit "$FAKE_GH_EXIT"; fi
 case "$1 $2" in
+  "api repos/"*/git/ref/heads/*)
+    # The queue branch lookup: FAKE_REF_EXIT makes it fail with $FAKE_REF_ERR on stderr.
+    if [ -n "${FAKE_REF_EXIT:-}" ]; then echo "${FAKE_REF_ERR:-gh: error}" >&2; exit "$FAKE_REF_EXIT"; fi
+    echo '{"ref":"refs/heads/queue","object":{"sha":"0000000000000000000000000000000000000000"}}' ;;
   "api repos/"*/commits/*) echo "${FAKE_COMMIT:?}" ;;
   *) echo "fake gh: unexpected call: $*" >&2; exit 99 ;;
 esac

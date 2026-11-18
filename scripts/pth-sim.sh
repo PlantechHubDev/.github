@@ -5,7 +5,11 @@
 # name, e.g. orchestration-service) against the images prod is running now (--prod-fleet).
 #
 # Steps, in order:
-#   1. Check the arguments and DEV (the workspace dev dir: engineering-handbook, platform-tests).
+#   1. Check the arguments and DEV (the workspace dev dir: engineering-handbook, platform-tests),
+#      MG_HEAD_REF (the merge_group head_ref, refs/heads/gh-readonly-queue/...) and
+#      GITHUB_REPOSITORY. Then, before SSO, the stack lock or npm, check with gh that the queue
+#      entry's branch still exists: a 404 (the queue dropped the entry while the job waited, e.g.
+#      for an asleep Mac) is exit 5, any other gh error exit 2.
 #   2. Read the digest prod is RUNNING for <service> the way platform-tests --prod-fleet does
 #      (ECS service prod-<service>-svc in prod-pth-cluster), and check that <digest> is an image
 #      in <service>'s ECR repository. Read-only, through the developer's SSO profile
@@ -29,7 +33,8 @@
 #
 # Exit: 0 pass; 1 simulation failed (env:up or tests); 2 resolver or setup error (ECS, ECR,
 # deployed sha, pt-ref, stack lease, worktree or npm ci); 3 more than one paired platform-tests
-# change; 4 AWS SSO expired; 64 usage. Prints "RESULT <rc>" last.
+# change; 4 AWS SSO expired; 5 queue entry gone (its merge-queue branch no longer exists); 64
+# usage. Prints "RESULT <rc>" last.
 # Overrides (tests): PT_REF (pt-ref path), PTH_STACK_LIB (pth-stack library path).
 set -uo pipefail
 
@@ -71,6 +76,8 @@ usage() { echo "usage: pth-sim.sh <service> <sha256:digest> <queue-sha>" >&2; fi
 [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || usage "digest must be sha256:<64 hex> (got '$digest'): the queue image job gave no digest"
 [[ $queue =~ ^[0-9a-f]{40}$ ]] || usage "queue sha must be 40 hex (got '$queue')"
 [ -n "${DEV:-}" ] || usage "DEV is not set: the runner's environment must name the workspace dev dir"
+[[ ${MG_HEAD_REF:-} == refs/heads/?* ]] || usage "MG_HEAD_REF must be the merge_group head_ref refs/heads/<queue branch> (got '${MG_HEAD_REF:-}')"
+[[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || usage "GITHUB_REPOSITORY must be <owner>/<repo> (got '${GITHUB_REPOSITORY:-}')"
 short=${svc%-service}
 PT_REF=${PT_REF:-$DEV/engineering-handbook/tools/pt-ref/pt-ref}
 PTH_STACK_LIB=${PTH_STACK_LIB:-$HOME/.local/bin/pth-stack}
@@ -80,6 +87,17 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_CREDENTIAL_E
 export AWS_PROFILE=${PTH_AWS_PROFILE:-pth-admin-prod} AWS_REGION=us-east-1
 
 err=$(mktemp); trap 'rm -f "$err"' EXIT
+
+# --- 1b. the queue entry still exists. A job that waited for an asleep Mac must not start a
+# stale simulation: once the queue drops the entry (it failed, timed out or was removed), its
+# branch is deleted. Checked before SSO, the stack lock and npm.
+qbranch=${MG_HEAD_REF#refs/heads/}
+if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$qbranch" >/dev/null 2>"$err"; then
+  if grep -q 'HTTP 404' "$err"; then
+    finish 5 "queue entry gone: $GITHUB_REPOSITORY has no branch $qbranch any more (the merge queue dropped this entry); not starting a stale simulation" "queue entry gone"
+  fi
+  finish 2 "cannot look up the queue branch $qbranch in $GITHUB_REPOSITORY: $(head -n 1 "$err")" "resolver error"
+fi
 # awsj <args...>: one read-only aws call, JSON into $J. Called directly (never inside $(...)) so
 # that finish exits the script: SSO trouble is exit 4, anything else 2.
 awsj() {

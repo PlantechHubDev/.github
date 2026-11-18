@@ -20,7 +20,8 @@
 # the platform-tests commit with pt-ref --release <deployed>..<queue commit>, leases a pth-test
 # stack and runs env:up --prod-fleet --image <short>=<registry>/<service>@<digest>, then npm test.
 # Exit codes: 0 pass, 1 simulation failed, 2 resolver/setup error, 3 more than one paired
-# platform-tests change (split the release), 4 AWS SSO expired (run aws sso login), 64 usage.
+# platform-tests change (split the release), 4 AWS SSO expired (run aws sso login), 5 queue entry
+# gone (the queue dropped it while the job waited), 64 usage.
 #
 # Keeping the Mac to queue runs at a release tag: the job runs only on merge_group (job-level
 # if, so a pull_request or push run never dispatches to the Mac), and its first step, before any
@@ -31,10 +32,12 @@
 # repo).
 #
 # Timeouts: timeout-minutes is 90. The merge queue's check timeout is 180 minutes, so pth-sim
-# (90) plus the image job before it (about 45) stays under it.
+# (90) plus the image job before it (about 45) stays under it. A job that waited for an asleep
+# Mac does not start a stale simulation: pth-sim.sh first checks that the queue entry's branch
+# (MG_HEAD_REF, the merge_group head_ref) still exists and exits 5 when it is gone.
 #
 # The runner's environment MUST set DEV (the workspace dev dir holding engineering-handbook and
-# platform-tests) and MAY set PTH_AWS_PROFILE (default pth-admin-prod). GitHub reads (pt-ref,
+# platform-tests) and MAY set PTH_AWS_PROFILE (default pth-admin-prod). GitHub reads (queue branch, pt-ref,
 # commit lookup) use the developer's gh login on the Mac; AWS reads use the SSO profile. No
 # secrets or AWS identifiers are passed from here.
 
@@ -97,4 +100,5 @@ jobs:
           SERVICE: ${{ inputs.service-name }}
           DIGEST: ${{ inputs.digest }}
           QUEUE_SHA: ${{ github.sha }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
         run: bash .pth-checks/scripts/pth-sim.sh "$SERVICE" "$DIGEST" "$QUEUE_SHA"

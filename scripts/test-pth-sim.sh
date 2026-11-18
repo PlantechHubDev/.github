@@ -27,6 +27,10 @@ DEPLOYED=$(printf '1%.0s' $(seq 40))           # its commit (fake gh)
 QSHA=$(printf '2%.0s' $(seq 40))               # queue commit
 export FAKE_QUEUE=$Q FAKE_DEPLOYED=$D FAKE_COMMIT=$DEPLOYED PT_OUT="$PTSHA master"
 SVC=orchestration-service
+# The queue entry's branch (merge_group head_ref) and the repo, as pth-sim.yml passes them.
+QREF=gh-readonly-queue/master/pr-12-$QSHA
+export MG_HEAD_REF=refs/heads/$QREF GITHUB_REPOSITORY=PlantechHubDev/$SVC
+unset FAKE_REF_EXIT FAKE_REF_ERR
 status=0
 
 pass() { echo "PASS $1"; }
@@ -56,9 +60,33 @@ empty "usage: no aws call" "$AWS_LOG"
 DEV="" run "usage: DEV unset exits 64" 64 $SVC "$Q" "$QSHA"
 has "usage: DEV unset says so" "DEV is not set"
 
+MG_HEAD_REF="" run "usage: MG_HEAD_REF unset exits 64" 64 $SVC "$Q" "$QSHA"
+has "usage: MG_HEAD_REF unset says so" "MG_HEAD_REF"
+MG_HEAD_REF=$QREF run "usage: MG_HEAD_REF without refs/heads/ exits 64" 64 $SVC "$Q" "$QSHA"
+GITHUB_REPOSITORY="" run "usage: GITHUB_REPOSITORY unset exits 64" 64 $SVC "$Q" "$QSHA"
+
+# --- the queue entry is gone (5): checked first, before SSO, pt-ref, the lock or npm
+FAKE_REF_EXIT=1 FAKE_REF_ERR="gh: Not Found (HTTP 404)" run "queue entry gone exits 5" 5 $SVC "$Q" "$QSHA"
+has "queue entry gone: says so" "queue entry gone"
+has "queue entry gone: names the branch" "$QREF"
+last "queue entry gone: RESULT 5 is the last line" "RESULT 5"
+logs "queue entry gone: looked up the queue branch" "$GH_LOG" "api repos/PlantechHubDev/$SVC/git/ref/heads/$QREF"
+empty "queue entry gone: no aws call (SSO not touched)" "$AWS_LOG"
+empty "queue entry gone: no pt-ref call" "$PT_LOG"
+empty "queue entry gone: no stack taken" "$STACK_LOG"
+empty "queue entry gone: no npm call" "$NPM_LOG"
+logs "queue entry gone: summary says so" "$GITHUB_STEP_SUMMARY" "queue entry gone"
+FAKE_REF_EXIT=1 FAKE_REF_ERR="gh: Bad credentials (HTTP 401)" run "queue branch lookup error exits 2" 2 $SVC "$Q" "$QSHA"
+has "queue branch lookup error: passes gh's reason on" "Bad credentials"
+empty "queue branch lookup error: no aws call" "$AWS_LOG"
+empty "queue branch lookup error: no npm call" "$NPM_LOG"
+last "queue branch lookup error: RESULT 2 is the last line" "RESULT 2"
+
 # --- happy path
 run "pass: exits 0" 0 $SVC "$Q" "$QSHA"
 last "pass: RESULT 0 is the last line" "RESULT 0"
+logs "pass: queue branch checked first" "$GH_LOG" "api repos/PlantechHubDev/$SVC/git/ref/heads/$QREF"
+if [ "$(head -n 1 "$GH_LOG")" = "api repos/PlantechHubDev/$SVC/git/ref/heads/$QREF" ]; then pass "pass: queue branch is the first gh call"; else fail "pass: queue branch is the first gh call" "$(cat "$GH_LOG")"; fi
 logs "pass: running digest read from ECS" "$AWS_LOG" "ecs list-tasks --cluster prod-pth-cluster --service-name prod-$SVC-svc --desired-status RUNNING"
 logs "pass: queue digest checked in the service's repo" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageDigest=$Q"
 logs "pass: deployed commit from the sha- tag" "$GH_LOG" "commits/1111111"
