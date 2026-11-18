@@ -5,6 +5,7 @@
 #     needs: publish
 #     uses: PlantechHubDev/.github/.github/workflows/pact-publish.yml@vX.Y.Z
 #     permissions:
+#       actions: read      # lists this run's artifacts
 #       contents: read
 #       packages: write
 #     with:
