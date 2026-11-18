@@ -105,7 +105,52 @@ def fail(msg):
     raise SystemExit(1)
 
 
+def queue_guard(block_text):
+    """The trunk example's ci-ok: allowed-skips names test, and a step that, on merge_group,
+    fails unless needs.image.result and needs.pth-sim.result are success, both through env.
+    Returns (image var, sim var, run script) or an error message."""
+    raw = block_text.splitlines()
+    st = next((i for i, l in enumerate(raw) if re.match(r"^  ci-ok:\s*$", l)), None)
+    if st is None:
+        return "the trunk ci.yml example needs a job id ci-ok"
+    job = []
+    for l in raw[st + 1:]:
+        if l.strip() and len(l) - len(l.lstrip(" ")) <= 2:
+            break
+        job.append(l)
+    text = "\n".join(job)
+    m = re.search(r"^\s+allowed-skips:\s*(.*)$", text, re.M)
+    if not m or "test" not in re.split(r"[\s,]+", m.group(1)):
+        return "the trunk ci.yml example's ci-ok needs test in allowed-skips (java-service-ci's test job skips for Dependabot)"
+    iv = re.search(r"^\s+([A-Z_]+):\s*\$\{\{\s*needs\.image\.result\s*\}\}\s*$", text, re.M)
+    sv = re.search(r"^\s+([A-Z_]+):\s*\$\{\{\s*needs\.pth-sim\.result\s*\}\}\s*$", text, re.M)
+    run, inrun, rind = [], False, 0
+    for l in job:
+        if inrun:
+            if l.strip() and len(l) - len(l.lstrip(" ")) <= rind:
+                break
+            run.append(l.strip())
+            continue
+        if re.match(r"^\s+run:\s*\|\s*$", l) and "merge_group" in "\n".join(job[job.index(l):]):
+            inrun, rind = True, len(l) - len(l.lstrip(" "))
+    script = "\n".join(run)
+    if not (iv and sv and "merge_group" in script and "${{" not in script):
+        return ("the trunk ci.yml example's ci-ok needs a merge_group guard step: on merge_group, fail unless "
+                "needs.image.result and needs.pth-sim.result are success (values through env)")
+    return iv.group(1), sv.group(1), script
+
+
 text = open(path, encoding="utf-8").read()
+if mode == "guard":
+    # Print the trunk example's guard as "<image var> <sim var>" then its run script.
+    blocks = re.findall(r"^```ya?ml\n(.*?)^```", text, re.S | re.M)
+    trunk = [b for b in blocks if "merge_group" in b and re.search(r"^jobs:", b, re.M)]
+    g = queue_guard(trunk[0]) if trunk else "no trunk example"
+    if isinstance(g, str):
+        fail(g)
+    print("%s %s" % (g[0], g[1]))
+    print(g[2])
+    raise SystemExit(0)
 if mode == "workflow":
     bad = push_problems(text)
     if bad:
@@ -121,6 +166,9 @@ else:
             fail("the trunk ci.yml example must not run on push (a push run's ci-ok must not satisfy the PR check)")
         if not any(j[0] == "ci-ok" for j in jobs(lines)):
             fail("the trunk ci.yml example needs a job id ci-ok")
+        g = queue_guard(b)
+        if isinstance(g, str):
+            fail(g)
     for b in blocks:
         bad = push_problems(b)
         if bad:
@@ -143,9 +191,26 @@ expect "readme fixture ok" 0 readme "$FIX/readme-good.md"
 expect "readme fixture: push in on" 1 readme "$FIX/readme-bad-push.md" "must not run on push"
 expect "readme fixture: no ci-ok job id" 1 readme "$FIX/readme-no-ciok-id.md" "job id ci-ok"
 expect "readme fixture: no example" 1 readme "$FIX/readme-missing.md" "no trunk ci.yml example"
+expect "readme fixture: ci-ok without the queue guard" 1 readme "$FIX/readme-no-queue-guard.md" "merge_group guard"
+expect "readme fixture: test not in allowed-skips" 1 readme "$FIX/readme-no-test-skip.md" "test in allowed-skips"
+# guardcheck <name> <want-exit> <event> <image result> <sim result>: run the README trunk
+# example's ci-ok guard step with those values.
+guardcheck() {
+  local name=$1 want=$2 g vars script out code
+  g=$(check_names guard "$ROOT/README.md") || { fail "$name" "cannot read the guard: $g"; return; }
+  vars=$(printf '%s\n' "$g" | head -n 1); script=$(printf '%s\n' "$g" | tail -n +2)
+  out=$(env "GITHUB_EVENT_NAME=$3" "${vars% *}=$4" "${vars#* }=$5" bash -e -c "$script" 2>&1); code=$?
+  if [ "$code" != "$want" ]; then fail "$name" "exit $code want $want; output: $out"; return; fi
+  pass "$name"
+}
 
 for f in "$ROOT"/.github/workflows/*.yml; do expect "repo workflow: $(basename "$f")" 0 workflow "$f"; done
 expect "repo README trunk example" 0 readme "$ROOT/README.md"
+guardcheck "README ci-ok guard: queue, both passed" 0 merge_group success success
+guardcheck "README ci-ok guard: queue, pth-sim skipped fails" 1 merge_group success skipped
+guardcheck "README ci-ok guard: queue, image failed fails" 1 merge_group failure skipped
+guardcheck "README ci-ok guard: queue, pth-sim cancelled fails" 1 merge_group success cancelled
+guardcheck "README ci-ok guard: pull_request, both skipped passes" 0 pull_request skipped skipped
 
 # --- pth-sim.yml keeps the developer's Mac runner to merge-queue runs at a release tag.
 # pthsim <file> <check|step>: "check" exits 0 when the pth-sim job has the job-level

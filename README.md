@@ -89,7 +89,7 @@ Install once per clone (every worktree of the clone inherits the hooks): `brew i
 
 A trunk repo merges through a GitHub merge queue into `master` instead of `develop` first. The queue builds the exact commit it will merge, simulates prod on it and, after the merge, a release workflow opens the deploy PR for that same image. The `ci.yml` below runs on `pull_request` and `merge_group` only; it MUST NOT run on `push`, so a push run can never produce a `ci-ok` that satisfies the PR's required check (`scripts/test-workflow-names.sh` checks this example and every workflow here).
 
-`ci.yml`: `checks`, `test` and `paired-tests` always; `image` and `pth-sim` only in the queue, with `pth-sim` taking `image`'s `digest`. `ci-ok` covers all of them, and `allowed-skips: image, pth-sim` lets a `pull_request` run pass without them.
+`ci.yml`: `checks`, `test` and `paired-tests` always; `image` and `pth-sim` only in the queue, with `pth-sim` taking `image`'s `digest`. `ci-ok` covers all of them: `allowed-skips: test, image, pth-sim` lets a `pull_request` run pass without `image` and `pth-sim` (and a Dependabot PR without `test`, which java-service-ci skips for Dependabot), and its first step fails a `merge_group` run unless `image` and `pth-sim` both passed.
 
 ```yaml
 # ci.yml
@@ -167,11 +167,22 @@ jobs:
     needs: [checks, test, paired-tests, image, pth-sim]
     runs-on: ubuntu-latest
     steps:
+      # allowed-skips would also pass a queue run whose image or pth-sim skipped: in the queue
+      # both MUST have run and passed.
+      - name: In the queue, image and pth-sim passed
+        env:
+          IMAGE_RESULT: ${{ needs.image.result }}
+          SIM_RESULT: ${{ needs.pth-sim.result }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = merge_group ] && { [ "$IMAGE_RESULT" != success ] || [ "$SIM_RESULT" != success ]; }; then
+            echo "::error::in the merge queue, image and pth-sim must pass (image: $IMAGE_RESULT, pth-sim: $SIM_RESULT)"
+            exit 1
+          fi
       - name: All required jobs passed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: image, pth-sim
+          allowed-skips: test, image, pth-sim
 ```
 
 `release.yml`: on the push the queue's fast-forward makes to `master`, `github.sha` is the commit the queue built and simulated, so nothing is rebuilt.
