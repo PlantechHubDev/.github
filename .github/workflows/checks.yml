@@ -10,7 +10,9 @@
 #                --redact. Allow-listing: the caller repo's .gitleaks.toml.
 #   commit-lint  on pull_request: the branch-name rule, then
 #                hooks/check-commit-msg.sh over the PR range; on merge_group:
-#                the same check over the queue's range (no branch-name rule). On push: a
+#                the same check over the queue's range (no branch-name rule), skipped
+#                when every non-merge commit there is by dependabot[bot], as on the PR
+#                (commit-lint-gate.sh reads the authors from the checkout). On push: a
 #                passing no-op (hooks cover local commits; the PR is the gate).
 #
 # Neither job has a job-level if: skips are steps, so a required check never

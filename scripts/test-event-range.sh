@@ -88,4 +88,35 @@ outputs "gate: dependabot lint=false" "lint=false"
 run "gate: push is a no-op"         0 gate EVENT=push
 outputs "gate: push lint=false" "lint=false"
 
+# --- merge_group with Dependabot commits: a real repo, since the gate reads the queue's commits.
+# The PR gate skipped a Dependabot PR, so the queue skips it too when every non-merge commit in
+# MG_BASE..MG_HEAD is authored by dependabot[bot]; any other author (or no readable range) lints.
+R=$T/mg-repo
+MG() { git -C "$R" -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
+as() { local who=$1; shift; MG -c user.name="$who" -c user.email="$who@example.invalid" "$@"; }
+git init -q -b master "$R"
+as dev commit -q --allow-empty -m "chore: base"
+BASE=$(MG rev-parse HEAD)
+MG checkout -q -b bump
+as 'dependabot[bot]' commit -q --allow-empty -m "Bump a from 1 to 2"
+as 'dependabot[bot]' commit -q --allow-empty -m "Bump b from 3 to 4"
+MG checkout -q master
+as 'github' merge -q --no-ff bump -m "Merge pull request #5 from o/dependabot/x"
+DEPHEAD=$(MG rev-parse HEAD)
+MG checkout -q -b mixed bump
+as dev commit -q --allow-empty -m "fix: tweak"
+MIXHEAD=$(MG rev-parse HEAD)
+# shellcheck disable=SC2329  # invoked through run
+gate_in() { (cd "$R" && gate "$@"); }
+run "gate: merge_group all-Dependabot exits 0" 0 gate_in EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_BASE="$BASE" MG_HEAD="$DEPHEAD"
+outputs "gate: merge_group all-Dependabot lint=false" "lint=false"
+has "gate: merge_group all-Dependabot says why" "Dependabot"
+run "gate: merge_group Dependabot plus another author" 0 gate_in EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_BASE="$BASE" MG_HEAD="$MIXHEAD"
+outputs "gate: mixed authors lint=true" "lint=true"
+outputs "gate: mixed authors range" "range=$BASE..$MIXHEAD"
+run "gate: merge_group empty range still lints" 0 gate_in EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_BASE="$BASE" MG_HEAD="$BASE"
+outputs "gate: empty range lint=true" "lint=true"
+run "gate: merge_group unreadable range lints" 0 gate_in EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_BASE="$A" MG_HEAD="$B"
+outputs "gate: unreadable range lint=true" "lint=true"
+
 exit $status
