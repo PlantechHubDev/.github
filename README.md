@@ -24,7 +24,7 @@ Org-wide defaults and shared checks for every PlantechHubDev repo.
 | `.github/workflows/java-service-publish.yml` | Reusable publish for a java service. Job `build-push`: Gradle `clean build`, then a linux/amd64 + linux/arm64 image to ECR only, tagged `:<branch>` and `:sha-<7>`, through OIDC. Inputs `service`, `java-version`, `ecr-role-arn` (pass `vars.ECR_PUSH_ROLE_ARN`), `mysql-test-image`; secrets `PUBLISH_TOKEN`, optional `TEAMS_WEBHOOK_URI`. |
 | `.github/workflows/java-service-image.yml` | Reusable queue image for a trunk java service: builds the exact merge-queue commit and pushes it to ECR as `:sha-<7>` through OIDC. Jobs `check` (finds an existing image), `build` (Gradle with no AWS credentials, then push), `result`. Output `digest` (`sha256:<64 hex>`); callers `needs` the workflow job and read its `digest`. Inputs `service-name`, `role-to-assume` (pass `vars.ECR_PUSH_ROLE_ARN`), `checks-ref`, `java-version`, `mysql-test-image`; secret `packages-read-token`. |
 | `.github/workflows/pth-sim.yml` | Reusable prod simulation in the merge queue: the full platform-tests suite on the queue image, on the self-hosted `pth-test` runner. Job `pth-sim`: runs only on `merge_group` (job-level `if`), fails before any checkout unless `checks-ref` is a release tag `vX.Y.Z`, and times out at 90 minutes (the queue's check timeout is 180). The org runner group restricts the runner to this workflow at a tag. Inputs `service-name`, `digest`, `checks-ref`. Work is in `scripts/pth-sim.sh`, which exits 5 without simulating when the queue entry's branch is gone. The runner's environment sets the environment details (see "Trunk repos" below). |
-| `.github/workflows/java-service-release.yml` | Reusable release for a trunk java service, on the caller's push to `master`. Nothing is rebuilt: it retags the queue image `:master` only when no prod unit pins `:master`, and has the CI App open the deploy PR in the infrastructure repo that pins the image digest. Inputs `service-name`, `role-to-assume`, `app-id`, `checks-ref`, `ci-workflow`, `infra-repo` (`<owner>/<name>`), `prod-unit` (the unit path the deploy PR edits) and `prod-units-pattern` (an ERE over `git ls-tree -r --name-only` paths listing every prod unit of the service), the last three with no default. The pattern MUST match every prod unit of the service, in every region, `prod-unit` included: the `:master` guard sees only the matched units, so the release fails (exit 2) when `prod-unit` is not among them; secret `app-key`. |
+| `.github/workflows/java-service-release.yml` | Reusable release for a trunk java service, on the caller's push to `master` (pth-context platform-ops decision 0126). Nothing is rebuilt and no infrastructure PR is opened: the job (environment `prod`, `us-east-1`) runs, each step only if the one before succeeded, the green gate (`scripts/queue-run-green.sh`: the `merge_group` run of `ci-workflow` for exactly the merged commit concluded `success`, with `ci-ok`, `image` and `pth-sim` passed and no job failed or cancelled), reads every prod unit's pin read-only from the infrastructure repo (`open-deploy-pr.sh --pins`), then `scripts/release-image.sh` (every prod unit MUST pin `:master`, else exit 3 with no AWS call; `sha-<7>` missing exits 2; then `sha-<7>` is retagged `master`), `scripts/ecs-deploy.sh` (force a new deployment, wait for `services-stable`, every running task on the retagged digest), `scripts/post-deploy-checks.sh` (digest, deployment `COMPLETED` at desired count, no `ERROR` log line since the deploy, no alarm in `ALARM`) and `scripts/deploy-comment.sh` (a comment on each service PR the deploy carried). Every gate runs before `:master` moves; a failure after the retag fails the run loudly, and recovery is a revert PR through the queue. Inputs `service-name`, `role-to-assume` (the deploy role), `checks-ref`, `ci-workflow`, `infra-repo` (`<owner>/<name>`), `prod-units-pattern` (an ERE over `git ls-tree -r --name-only` paths that MUST match every prod unit of the service, in every region), `ecs-cluster`, `ecs-service`, `log-group` and `alarm-prefix`, all required, from variables. No secrets: the caller's `GITHUB_TOKEN` only (`contents: read`, `id-token: write`, `actions: read`, `pull-requests: write`). |
 | `.github/workflows/java-library-ci.yml` | Reusable build for a java library. Job `test` (no committed `mavenLocal()`, then Gradle `clean build`; skipped on Dependabot runs). No `version-check` from v2.0.0: versions are computed at release. Inputs `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
 | `.github/workflows/java-library-publish.yml` | Reusable release for a java library, on a push to its release branch. Job `publish-package`: git-cliff with `cliff.toml` computes the version `V` from the commits since the last `vX.Y.Z` tag; never overwrites (a published `V` is skipped only when `v<V>` is on this commit, else the job fails); `RELEASE_VERSION=V` build and `gradle publish`; annotated tag `v<V>`; GitHub Release with git-cliff's notes and the Maven coordinates. Never prunes old versions. Caller grants `contents: write`, `packages: write`. Inputs `artifact-id`, `checks-ref`, `release-branch`, `java-version`, `mysql-test-image`, `git-cliff-version`, `git-cliff-sha256`; secrets `PUBLISH_TOKEN`, optional `LIBRARY_WEBHOOK_URI`. |
 | `cliff.toml` | git-cliff config for library releases: `tag_pattern` `^v[0-9]+\.[0-9]+\.[0-9]+$`; breaking → major (also from 0.x), `feat` → minor, anything else → patch; notes list each commit's `Refs:`. |
@@ -56,7 +56,7 @@ A consumer repo publishes the contract files its tests write; a provider repo ve
 
 The commit standard itself (types, `Refs:`, `BREAKING CHANGE:`, exemptions) is documented in the engineering handbook, `workflow.md`, "Commits".
 
-**Public here, private in `scripts`.** This repo is public, because GitHub only applies org defaults from a public `.github` repo, and because private repos can only call reusable workflows from a public repo (or with extra org settings). Only files that are safe for anyone to read belong here. Anything else tied to our environment (other deploy scripts, hostnames, anything that needs credentials) lives in the private `scripts` repo or in the repo it belongs to. The trunk release and simulation scripts (`pth-sim.sh`, `deployed-sha.sh`, `release-image.sh`, `ecr-retag.sh`, `open-deploy-pr.sh` and the scripts they call) live here because reusable workflows run scripts from `checks-ref`, a ref of this repo, so they name no part of our environment: cluster, service, profile, repo and path values come from caller inputs (passed from variables) or from the `pth-test` runner's environment, and tests and fixtures use placeholders (`example-service`, `other-service`, `region-a`, `registry.example.test`).
+**Public here, private in `scripts`.** This repo is public, because GitHub only applies org defaults from a public `.github` repo, and because private repos can only call reusable workflows from a public repo (or with extra org settings). Only files that are safe for anyone to read belong here. Anything else tied to our environment (other deploy scripts, hostnames, anything that needs credentials) lives in the private `scripts` repo or in the repo it belongs to. The trunk release and simulation scripts (`pth-sim.sh`, `deployed-sha.sh`, `queue-run-green.sh`, `release-image.sh`, `ecr-retag.sh`, `ecs-deploy.sh`, `post-deploy-checks.sh`, `deploy-comment.sh`, `open-deploy-pr.sh` and the scripts they call) live here because reusable workflows run scripts from `checks-ref`, a ref of this repo, so they name no part of our environment: cluster, service, log group, alarm, profile, repo and path values come from caller inputs (passed from variables) or from the `pth-test` runner's environment, and tests and fixtures use placeholders (`example-service`, `other-service`, `region-a`, `registry.example.test`).
 
 ## Hygiene rules for this public repo
 
@@ -102,7 +102,7 @@ Install once per clone (every worktree of the clone inherits the hooks): `brew i
 
 ## Trunk repos (merge queue)
 
-A trunk repo merges through a GitHub merge queue into `master` instead of `develop` first. The queue builds the exact commit it will merge, simulates prod on it and, after the merge, a release workflow opens the deploy PR for that same image. The `ci.yml` below runs on `pull_request` and `merge_group` only; it MUST NOT run on `push`, so a push run can never produce a `ci-ok` that satisfies the PR's required check (`scripts/test-workflow-names.sh` checks this example and every workflow here).
+A trunk repo merges through a GitHub merge queue into `master` instead of `develop` first. The queue builds the exact commit it will merge, simulates prod on it and, after the merge, a release workflow tags that same image `:master` and forces a new deployment of the prod service, only when the queue run and the release's own checks are all green. The `ci.yml` below runs on `pull_request` and `merge_group` only; it MUST NOT run on `push`, so a push run can never produce a `ci-ok` that satisfies the PR's required check (`scripts/test-workflow-names.sh` checks this example and every workflow here).
 
 `ci.yml`: `checks`, `test` and `paired-tests` always; `image` and `pth-sim` only in the queue, with `pth-sim` taking `image`'s `digest`. `ci-ok` covers all of them: `allowed-skips: test, image, pth-sim` lets a `pull_request` run pass without `image` and `pth-sim` (and a Dependabot PR without `test`, which java-service-ci skips for Dependabot), and its first step fails a `merge_group` run unless `image` and `pth-sim` both passed.
 
@@ -200,7 +200,7 @@ jobs:
           allowed-skips: test, image, pth-sim
 ```
 
-`release.yml`: on the push the queue's fast-forward makes to `master`, `github.sha` is the commit the queue built and simulated, so nothing is rebuilt.
+`release.yml`: on the push the queue's fast-forward makes to `master`, `github.sha` is the commit the queue built and simulated, so nothing is rebuilt. The enqueue is the go for both the merge and the deploy: the release retags `:master` and forces the deployment only when the queue run for that commit was green and every prod unit pins `:master`.
 
 ```yaml
 # release.yml
@@ -215,25 +215,26 @@ permissions:
 
 jobs:
   release:
-    uses: PlantechHubDev/.github/.github/workflows/java-service-release.yml@v2.4.0
+    uses: PlantechHubDev/.github/.github/workflows/java-service-release.yml@v2.6.0
     permissions:
       contents: read
       id-token: write
       actions: read
+      pull-requests: write
     with:
       service-name: example-service
-      role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
-      app-id: ${{ vars.PTH_CI_APP_ID }}
-      checks-ref: v2.4.0
+      role-to-assume: ${{ vars.ECS_DEPLOY_ROLE_ARN }}
+      checks-ref: v2.6.0
       ci-workflow: ci.yml
       infra-repo: ${{ vars.INFRA_REPO }}
-      prod-unit: ${{ vars.PROD_UNIT }}
       prod-units-pattern: ${{ vars.PROD_UNITS_PATTERN }}
-    secrets:
-      app-key: ${{ secrets.PTH_CI_APP_KEY }}
+      ecs-cluster: ${{ vars.ECS_CLUSTER }}
+      ecs-service: ${{ vars.ECS_SERVICE }}
+      log-group: ${{ vars.LOG_GROUP }}
+      alarm-prefix: ${{ vars.ALARM_PREFIX }}
 ```
 
-What a caller needs, by name only: org or repo variables `vars.ECR_PUSH_ROLE_ARN`, `vars.PTH_CI_APP_ID`, `vars.INFRA_REPO`, `vars.PROD_UNIT` and `vars.PROD_UNITS_PATTERN` (the infrastructure repo and its layout are kept in variables, never in this public repo; `PROD_UNIT` and `PROD_UNITS_PATTERN` are per service, so they are repo variables), and secrets `secrets.PTH_CI_APP_KEY` and `secrets.PUBLISH_TOKEN`. The `pth-test` self-hosted runner, the `trunk` ruleset (required check `ci-ok`, merge queue) and the merge queue settings are configured outside this repo: see the engineering handbook and the org rulesets.
+What a caller needs, by name only: org or repo variables `vars.ECR_PUSH_ROLE_ARN` and `vars.PTH_CI_APP_ID` (for `ci.yml`), `vars.ECS_DEPLOY_ROLE_ARN` (the deploy role, trusted only for `master` and this workflow at a tag), `vars.INFRA_REPO`, `vars.PROD_UNITS_PATTERN`, `vars.ECS_CLUSTER`, `vars.ECS_SERVICE`, `vars.LOG_GROUP` and `vars.ALARM_PREFIX` (the environment's names are kept in variables, never in this public repo; all but `INFRA_REPO` are per service, so they are repo variables), and secrets `secrets.PTH_CI_APP_KEY` and `secrets.PUBLISH_TOKEN` (for `ci.yml`). The release job runs in the GitHub environment `prod`, which the caller repo must have. Every prod task definition of the service MUST pin `<service>:master`, or the release fails before the retag. The `pth-test` self-hosted runner, the `trunk` ruleset (required check `ci-ok`, merge queue) and the merge queue settings are configured outside this repo: see the engineering handbook and the org rulesets.
 
 The `pth-test` runner's environment MUST set these (names only; the values live on the runner, never in this repo). `pth-sim.sh` has no defaults for them and exits 64 naming every one that is missing:
 

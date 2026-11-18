@@ -322,4 +322,137 @@ tagcheck "pth-sim tag check: a pre-release is rejected" 1 v2.4.0-rc.1
 tagcheck "pth-sim tag check: empty is rejected" 1 ""
 tagcheck "pth-sim tag check: a second line is rejected" 1 $'v2.4.0\nmaster'
 
+# --- java-service-release.yml: the release deploys :master by a forced deployment, only after
+# every gate. release_check <file> exits 0 when: the workflow_call inputs are exactly the
+# consumer contract (all required strings) and it takes no secrets (no CI App); the job runs in
+# environment prod with permissions contents read, id-token write, actions read, pull-requests
+# write; and the steps call, in this order, queue-run-green.sh, open-deploy-pr.sh --pins (and no
+# other open-deploy-pr.sh mode), release-image.sh, ecs-deploy.sh, post-deploy-checks.sh and
+# deploy-comment.sh, none of those steps with an if: or continue-on-error (each runs only when
+# every step before it succeeded). Else 1 naming the problem.
+release_check() {
+  python3 -I - "$1" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+base = path.rsplit("/", 1)[-1]
+raw = open(path, encoding="utf-8").read().splitlines()
+WANT = ["service-name", "role-to-assume", "checks-ref", "ci-workflow", "infra-repo",
+        "prod-units-pattern", "ecs-cluster", "ecs-service", "log-group", "alarm-prefix"]
+CHAIN = ["queue-run-green.sh", "open-deploy-pr.sh --pins", "release-image.sh", "ecs-deploy.sh",
+         "post-deploy-checks.sh", "deploy-comment.sh"]
+PERMS = {"contents": "read", "id-token": "write", "actions": "read", "pull-requests": "write"}
+
+
+def ind(l):
+    return len(l) - len(l.lstrip(" "))
+
+
+def fail(msg):
+    print("%s: %s" % (base, msg))
+    raise SystemExit(1)
+
+
+def section(lines, header_re, at):
+    """Lines under the first line matching header_re at indentation `at`."""
+    st = next((i for i, l in enumerate(lines) if ind(l) == at and re.match(header_re, l.strip())), None)
+    if st is None:
+        return None
+    out = []
+    for l in lines[st + 1:]:
+        if l.strip() and not l.strip().startswith("#") and ind(l) <= at:
+            break
+        out.append(l)
+    return out
+
+
+code = [l for l in raw if l.strip() and not l.strip().startswith("#")]
+wc = section(code, r"^workflow_call:\s*$", 2)
+if wc is None:
+    fail("no on.workflow_call")
+inputs = section(wc, r"^inputs:\s*$", 4) or []
+names, blocks = [], {}
+for l in inputs:
+    m = re.match(r"^([a-z0-9-]+):\s*(.*)$", l.strip())
+    if m and ind(l) == 6:
+        names.append(m.group(1))
+        blocks[m.group(1)] = m.group(2)
+    elif names and ind(l) > 6:
+        blocks[names[-1]] += " " + l.strip()
+if sorted(names) != sorted(WANT):
+    fail("inputs must be exactly %s (got %s)" % (", ".join(WANT), ", ".join(names)))
+for n in WANT:
+    b = blocks[n]
+    if not re.search(r"type:\s*string", b) or not re.search(r"required:\s*true", b):
+        fail("input %s must be a required string" % n)
+if section(wc, r"^secrets:\s*$", 4) is not None:
+    fail("the release takes no secrets (no CI App)")
+job = section(code, r"^release:\s*$", 2)
+if job is None:
+    fail("no job release")
+keys = {}
+for l in job:
+    m = re.match(r"^([a-z-]+):\s*(.*?)\s*$", l.strip())
+    if m and ind(l) == 4:
+        keys[m.group(1)] = m.group(2)
+if keys.get("environment") != "prod":
+    fail("the release job needs environment: prod (got '%s')" % keys.get("environment", ""))
+perms = {}
+for l in section(job, r"^permissions:\s*$", 4) or []:
+    m = re.match(r"^([a-z-]+):\s*(\S+)", l.strip())
+    if m and ind(l) == 6:
+        perms[m.group(1)] = m.group(2)
+if perms != PERMS:
+    fail("the release job's permissions must be %s (got %s)" % (PERMS, perms))
+steps, cur = [], None
+for l in section(job, r"^steps:\s*$", 4) or []:
+    if ind(l) == 6 and l.strip().startswith("- "):
+        cur = [l]
+        steps.append(cur)
+    elif cur is not None:
+        cur.append(l)
+order = []
+for st in steps:
+    text = "\n".join(st)
+    if "create-github-app-token" in text:
+        fail("the release must not mint a CI App token")
+    if re.search(r"open-deploy-pr\.sh(?!\"?\s+--pins)", text):
+        fail("open-deploy-pr.sh may only be called with --pins (read-only)")
+    found = [c for c in CHAIN if re.search(re.escape(c).replace(r"\ ", r"\"?\s+"), text)]
+    if not found:
+        continue
+    if re.search(r"^\s+(- )?(if|continue-on-error):", text, re.M):
+        fail("the step calling %s must not have if: or continue-on-error (it runs only when every step before it succeeded)" % found[0])
+    order.extend(found)
+if order != CHAIN:
+    fail("the steps must call %s in this order (got %s)" % (" -> ".join(CHAIN), " -> ".join(order) or "none"))
+PY
+}
+expect_release() {
+  local name=$1 want=$2 file=$3 text=${4:-} out code
+  out=$(release_check "$file" 2>&1); code=$?
+  if [ "$code" != "$want" ]; then fail "$name" "exit $code want $want; output: $out"; return; fi
+  if [ -n "$text" ] && [[ $out != *"$text"* ]]; then fail "$name" "output lacks '$text': $out"; return; fi
+  pass "$name"
+}
+expect_release "release fixture: the old deploy-PR release is rejected" 1 "$FIX/release-bad-old.yml" "inputs must be exactly"
+expect_release "release fixture: retag before the green gate is rejected" 1 "$FIX/release-bad-order.yml" "in this order"
+expect_release "release fixture: deploy step with if: always() is rejected" 1 "$FIX/release-bad-if.yml" "must not have if:"
+expect_release "repo java-service-release.yml: gates, then retag, deploy, checks, comment" 0 "$ROOT/.github/workflows/java-service-release.yml"
+# The README's release.yml example passes the new inputs and none of the removed ones.
+readme_release=$(python3 -I - "$ROOT/README.md" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+b = [x for x in re.findall(r"^```ya?ml\n(.*?)^```", text, re.S | re.M) if "java-service-release.yml@" in x]
+print(b[0] if b else "")
+PY
+)
+for k in ecs-cluster ecs-service log-group alarm-prefix service-name role-to-assume checks-ref ci-workflow infra-repo prod-units-pattern; do
+  if [[ $readme_release == *"      $k: "* ]]; then pass "README release example passes $k"; else fail "README release example passes $k" "missing"; fi
+done
+for k in app-id prod-unit app-key; do
+  if [[ $readme_release == *"      $k: "* ]]; then fail "README release example drops $k" "still there"; else pass "README release example drops $k"; fi
+done
+if [[ $readme_release == *"pull-requests: write"* ]]; then pass "README release example grants pull-requests: write"; else fail "README release example grants pull-requests: write" "missing"; fi
+
 exit $status

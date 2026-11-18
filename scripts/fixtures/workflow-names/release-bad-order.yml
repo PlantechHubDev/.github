@@ -1,0 +1,39 @@
+# Fixture: the retag runs before the green gate.
+name: java-service-release
+on:
+  workflow_call:
+    inputs:
+      service-name: {type: string, required: true}
+      role-to-assume: {type: string, required: true}
+      checks-ref: {type: string, required: true}
+      ci-workflow: {type: string, required: true}
+      infra-repo: {type: string, required: true}
+      prod-units-pattern: {type: string, required: true}
+      ecs-cluster: {type: string, required: true}
+      ecs-service: {type: string, required: true}
+      log-group: {type: string, required: true}
+      alarm-prefix: {type: string, required: true}
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Pins
+        run: bash .pth-checks/scripts/open-deploy-pr.sh --pins x > pins
+      - name: Retag
+        run: bash .pth-checks/scripts/release-image.sh x y < pins
+      - name: Gate
+        run: bash .pth-checks/scripts/queue-run-green.sh a b c
+      - name: Deploy
+        run: bash .pth-checks/scripts/ecs-deploy.sh a b c
+      - name: Checks
+        run: bash .pth-checks/scripts/post-deploy-checks.sh a b c d e f
+      - name: Comment
+        run: bash .pth-checks/scripts/deploy-comment.sh a b c d
