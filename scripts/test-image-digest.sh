@@ -35,4 +35,10 @@ FILE=metadata-ok.json;      check "existing: metadata JSON is not describe-image
 MODE=found;   check "ecr: image exists prints digest" 0 "$DIGEST" existing
 MODE=missing; check "ecr: ImageNotFoundException prints nothing, exit 0" 0 "" existing
 MODE=denied;  check "ecr: any other aws error exits 1" 1 "" existing
+
+# --- usage (64)
+FILE=metadata-ok.json; check "usage: unknown option exits 64" 64 "" digest --bogus
+check "usage: ecr-existing-digest with no args exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh"
+check "usage: ecr-existing-digest with one arg exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh" calc-service
+check "usage: ecr-existing-digest with an empty tag exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh" calc-service ""
 exit $status
