@@ -19,6 +19,12 @@
 # because on push this check is a passing no-op, and a push run's "ci-ok" on the PR's head
 # sha could otherwise satisfy the PR's required ci-ok check without the paired-tests result.
 #
+# Merge queue: the caller's ci.yml also triggers on `merge_group` (types: [checks_requested]).
+# There the PR number comes from the queue branch name (github.event.merge_group.head_ref,
+# gh-readonly-queue/<branch>/pr-<n>-<sha>) through scripts/queue-pr-number.sh, and the check
+# reads that PR from the API as usual. The caller's concurrency group SHOULD be
+# ${{ github.event.pull_request.number || github.event.merge_group.head_ref }}.
+#
 # Name the calling job paired-tests: rerun-paired-tests.sh re-runs the ci.yml job whose
 # name starts with "paired-tests" (here "paired-tests / check").
 #
@@ -92,7 +98,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
         run: |
+          # In the merge queue the PR number is in the queue branch name.
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            PR=$(bash .pth-checks/scripts/queue-pr-number.sh "$MG_HEAD_REF") || exit 1
+          fi
           if [ -z "$PR" ]; then
             echo "::notice::paired-tests: not a pull request event; nothing to check."
             echo "needed=false" >>"$GITHUB_OUTPUT"
@@ -134,5 +146,11 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
           PT_REF: .handbook/tools/pt-ref/pt-ref
-        run: bash .pth-checks/scripts/paired-tests-check.sh "$REPO" "$PR"
+        run: |
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            PR=$(bash .pth-checks/scripts/queue-pr-number.sh "$MG_HEAD_REF") || exit 1
+          fi
+          bash .pth-checks/scripts/paired-tests-check.sh "$REPO" "$PR"
