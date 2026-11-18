@@ -245,6 +245,39 @@ setup terragrunt-noimage.hcl
 run "base: no image line exits 2" 2 --base-digest $SVC
 run "base: usage" 64 --base-digest
 
+# --- --pins: every prod unit of the service, in every region, from origin master
+WEST=plantechhub/us-west-2/prod/$SVC/terragrunt.hcl
+# add_unit <path> <fixture>: commit <fixture> at <path> on origin master (through $W).
+add_unit() { mkdir -p "$W/$(dirname "$1")"; cp "$FIX/$2" "$W/$1"; G -C "$W" add -A; G -C "$W" commit -q -m "chore: add $1"; G -C "$W" push -q origin master; }
+setup terragrunt-digest.hcl
+add_unit "$WEST" terragrunt-dr-master.hcl
+add_unit plantechhub/us-west-2/prod/calc-service/terragrunt.hcl terragrunt-dr-master.hcl
+add_unit "plantechhub/us-east-1/staging/$SVC/terragrunt.hcl" terragrunt-master.hcl
+add_unit "plantechhub/us-east-1/prod/$SVC-extra/terragrunt.hcl" terragrunt-master.hcl
+run "pins: exits 0" 0 --pins $SVC
+is "pins: one line per prod unit, all regions, with its pin" "$so" "plantechhub/us-east-1/prod/$SVC/terragrunt.hcl digest
+$WEST tag:master"
+nologs "pins: no aws call" "$AWS_LOG" "ecr"
+# --pins | release-image.sh: the DR unit's :master pin stops the retag.
+: > "$AWS_LOG"
+pipe=$( (cd "$W" && bash "$HERE/open-deploy-pr.sh" --pins $SVC) | FAKE_TAG_DIGEST=$A FAKE_SRC_DIGEST=$A GITHUB_OUTPUT=$T/out bash "$HERE/release-image.sh" $SVC "$MERGE" 2>&1)
+nologs "pins | release-image: no put-image while us-west-2 pins :master" "$AWS_LOG" "put-image"
+has "pins | release-image: warning names the us-west-2 unit" "$pipe" "$WEST"
+setup terragrunt-digest.hcl
+add_unit "$WEST" terragrunt-digest.hcl
+run "pins: all digests exits 0" 0 --pins $SVC
+is "pins: all digests" "$so" "plantechhub/us-east-1/prod/$SVC/terragrunt.hcl digest
+$WEST digest"
+setup terragrunt-digest.hcl
+add_unit "$WEST" terragrunt-noimage.hcl
+run "pins: unparseable unit exits 0" 0 --pins $SVC
+is "pins: unparseable unit reported, not dropped" "$so" "plantechhub/us-east-1/prod/$SVC/terragrunt.hcl digest
+$WEST unparseable"
+setup terragrunt-digest.hcl
+G -C "$W" rm -q -r plantechhub; G -C "$W" commit -q -m "chore: drop"; G -C "$W" push -q origin master
+run "pins: no prod unit exits 2" 2 --pins $SVC
+run "pins: usage" 64 --pins
+
 # --- sim-run-url.sh: the merge_group run of the caller's CI workflow for the merged commit
 sim() { : > "$GH_LOG"; out=$(bash "$HERE/sim-run-url.sh" "$@" 2>/dev/null); code=$?; }
 FAKE_RUNS='{"workflow_runs":[

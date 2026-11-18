@@ -3,10 +3,10 @@
 # prod on it; the queue then fast-forwards master to that exact commit, so on push to master
 # github.sha is the simulated commit. This workflow has the CI GitHub App open a deploy PR in
 # PlantechHubDev/infrastructure-live that pins that image's digest in the prod unit, and tags the
-# image master (same manifest, same digest) only when prod does not pin :master. Deploying stays
-# a human merge of that PR: while a unit pins :master, moving :master would put an unapproved
-# image into prod at the next task restart, so :master is left alone (with a warning) until the
-# unit pins a digest.
+# image master (same manifest, same digest) only when no prod unit pins :master. Deploying stays
+# a human merge of that PR: while any prod unit in any region pins :master (ECR replication moves
+# the tag everywhere), moving :master would put an unapproved image into prod at the next task
+# start, so :master is left alone (with a warning) until every prod unit pins a digest.
 #
 #   on:
 #     push:
@@ -28,8 +28,9 @@
 #         app-key: ${{ secrets.PTH_CI_APP_KEY }}
 #
 # Steps, in order: read what infrastructure-live master pins now (open-deploy-pr.sh --base-digest:
-# the digest, which becomes the PR's rollback digest, and whether it is a digest or a tag) ->
-# pick the sha-<7> digest and retag it master unless the pin is :master (scripts/release-image.sh;
+# the us-east-1 digest, which becomes the PR's rollback digest; --pins: the pin of every prod unit
+# of the service in every region) -> pick the sha-<7> digest and retag it master unless a unit
+# pins :master or cannot be parsed (scripts/release-image.sh;
 # a missing sha-<7> image fails the run and opens no PR) -> find the simulation run
 # (scripts/sim-run-url.sh) -> open the deploy PR (scripts/open-deploy-pr.sh, which also writes the
 # step summary). The scripts are covered by scripts/test-ecr-retag.sh and
@@ -145,7 +146,7 @@ jobs:
           role-to-assume: ${{ inputs.role-to-assume }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Before any retag: the pinned digest (rollback digest) and the pin kind (digest or tag:<name>).
+      # Before any retag: the us-east-1 digest (rollback digest), and every region's prod pin.
       - name: Read what prod is pinned to
         id: base
         working-directory: infra
@@ -155,17 +156,18 @@ jobs:
         run: |
           read -r BASE PIN < <(bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --base-digest "$SERVICE") || exit 1
           [[ $BASE =~ ^sha256:[0-9a-f]{64}$ && $PIN =~ ^(digest|tag:[A-Za-z0-9_.-]+)$ ]] || { echo "::error::cannot read the prod pin (got '$BASE' '$PIN')"; exit 1; }
-          echo "Rollback digest: $BASE (pin: $PIN)"
+          echo "Rollback digest: $BASE (us-east-1 pin: $PIN)"
           echo "digest=$BASE" >> "$GITHUB_OUTPUT"
-          echo "pin=$PIN" >> "$GITHUB_OUTPUT"
+          bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --pins "$SERVICE" > "$RUNNER_TEMP/prod-pins" || exit 1
+          echo "Prod units:"; cat "$RUNNER_TEMP/prod-pins"
 
-      # Writes digest= to GITHUB_OUTPUT; skips the retag (with a warning) while prod pins :master.
-      - name: Pick the simulated image; tag it master unless prod pins master
+      # Writes digest= to GITHUB_OUTPUT; skips the retag (with a warning) while any prod unit pins
+      # :master or cannot be parsed.
+      - name: Pick the simulated image; tag it master unless a prod unit pins master
         id: retag
         env:
           SERVICE: ${{ inputs.service-name }}
-          PIN: ${{ steps.base.outputs.pin }}
-        run: bash .pth-checks/scripts/release-image.sh "$SERVICE" "$GITHUB_SHA" "$PIN"
+        run: bash .pth-checks/scripts/release-image.sh "$SERVICE" "$GITHUB_SHA" < "$RUNNER_TEMP/prod-pins"
 
       - name: Find the simulation run
         id: sim

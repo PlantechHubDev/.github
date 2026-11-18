@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # open-deploy-pr.sh <service> <sha256:digest> <merge-sha> <sim-run-url>
 # open-deploy-pr.sh --base-digest <service>
+# open-deploy-pr.sh --pins <service>
 #
 # Run in an infrastructure-live checkout (remote origin). Proposes the prod deploy of a released
 # image: on branch deploy/<service>-<first 7 of merge-sha> it changes only the `image = "..."`
@@ -19,6 +20,13 @@
 # digest pin, or "<tag's digest in ECR> tag:<tag>" for a tag pin (e.g. :master). Call it before any
 # retag; pass the digest as BASE_DIGEST and the pin to release-image.sh (which then leaves a
 # pinned :master alone).
+#
+# --pins prints "<path> <pin>" for every prod unit of the service on origin master, in every
+# region (plantechhub/<region>/prod/<service>/terragrunt.hcl). <pin> is "digest", "tag:<name>", or
+# "unparseable" when the unit has not exactly one image line of the form above. It reads git only
+# (no AWS). release-image.sh reads this list and leaves :master alone while any unit pins :master
+# or is unparseable (ECR replication would move :master in every region). Exit 0, or 2 when the
+# service has no prod unit.
 #
 # Output: stdout carries only the PR URL (nothing when there is no PR); messages go to stderr.
 # When GITHUB_STEP_SUMMARY is set, a line is added there: the PR, "already pinned", and any older
@@ -52,6 +60,7 @@ usage() {
   echo "open-deploy-pr: $1" >&2
   echo "usage: open-deploy-pr.sh <service> <sha256:digest> <merge-sha> <sim-run-url>" >&2
   echo "       open-deploy-pr.sh --base-digest <service>" >&2
+  echo "       open-deploy-pr.sh --pins <service>" >&2
   exit 64
 }
 die()  { echo "open-deploy-pr: $*" >&2; exit 1; }
@@ -60,11 +69,11 @@ summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "$*" >> "$GITHUB_STEP_SUMM
 # Network git: credentials from gh (GH_TOKEN), since the checkout keeps none.
 Gn() { git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 
-base_mode=false
-if [ "${1-}" = --base-digest ]; then
-  base_mode=true; shift
-  [ $# -eq 1 ] || usage "--base-digest takes 1 argument, got $#"
-  svc=$1
+base_mode=false pins_mode=false
+if [ "${1-}" = --base-digest ] || [ "${1-}" = --pins ]; then
+  if [ "$1" = --pins ]; then pins_mode=true; else base_mode=true; fi
+  [ $# -eq 2 ] || usage "$1 takes 1 argument, got $(($# - 1))"
+  svc=$2
 else
   [ $# -eq 4 ] || usage "expected 4 arguments, got $#"
   svc=$1 digest=$2 merge=$3 sim=$4
@@ -82,25 +91,38 @@ UNIT=plantechhub/us-east-1/prod/$svc/terragrunt.hcl
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-# parse_pin <file>: find the one `image =` line and split it. Sets PIN_NO (line number), PIN_PRE
+# parse_pin <file> [label]: find (messages name <label>, default the unit path) the one `image =` line and split it. Sets PIN_NO (line number), PIN_PRE
 # (up to the opening quote), PIN_VAL, PIN_POST (closing quote on), PIN_IMAGE (<registry>/<service>),
 # and PIN_TAG or PIN_DIGEST. Exits 2 when there is not exactly one such line or it does not parse.
 parse_pin() {
-  local hits count line re
+  local hits count line re label=${2:-$UNIT}
   hits=$(grep -nE '^[[:space:]]*image[[:space:]]*=' "$1")
   count=$(printf '%s' "$hits" | grep -c .)
-  [ "$count" -eq 1 ] || die2 "$UNIT: expected exactly one 'image =' line, found $count"
+  [ "$count" -eq 1 ] || die2 "$label: expected exactly one 'image =' line, found $count"
   PIN_NO=${hits%%:*} line=${hits#*:}
   re='^([[:space:]]*image[[:space:]]*=[[:space:]]*")([^"]*)(".*)$'
-  [[ $line =~ $re ]] || die2 "$UNIT:$PIN_NO: image is not a quoted string: $line"
+  [[ $line =~ $re ]] || die2 "$label:$PIN_NO: image is not a quoted string: $line"
   PIN_PRE=${BASH_REMATCH[1]} PIN_VAL=${BASH_REMATCH[2]} PIN_POST=${BASH_REMATCH[3]}
   re="^([^\"@[:space:]]+/$svc)(:([A-Za-z0-9_][A-Za-z0-9_.-]*)|@(sha256:[0-9a-f]{64}))\$"
-  [[ $PIN_VAL =~ $re ]] || die2 "$UNIT:$PIN_NO: image '$PIN_VAL' is not <registry>/$svc:<tag> or <registry>/$svc@sha256:<digest>"
+  [[ $PIN_VAL =~ $re ]] || die2 "$label:$PIN_NO: image '$PIN_VAL' is not <registry>/$svc:<tag> or <registry>/$svc@sha256:<digest>"
   PIN_IMAGE=${BASH_REMATCH[1]} PIN_TAG=${BASH_REMATCH[3]} PIN_DIGEST=${BASH_REMATCH[4]}
 }
 
 # What origin master pins now.
 Gn fetch -q origin master 2>"$tmp/err" || die "cannot fetch origin master: $(head -n 1 "$tmp/err")"
+
+if $pins_mode; then
+  units=$(git ls-tree -r --name-only origin/master -- plantechhub | grep -E "^plantechhub/[^/]+/prod/$svc/terragrunt\.hcl\$")
+  [ -n "$units" ] || die2 "no prod unit plantechhub/<region>/prod/$svc/terragrunt.hcl on origin master"
+  while IFS= read -r u; do
+    # parse_pin exits on a bad unit; the subshell turns that into "unparseable" (fail closed).
+    pin=$(git show "origin/master:$u" > "$tmp/u.hcl" 2>/dev/null &&
+          parse_pin "$tmp/u.hcl" "$u" 2>/dev/null &&
+          if [ -n "$PIN_DIGEST" ]; then echo digest; else echo "tag:$PIN_TAG"; fi) || pin=unparseable
+    echo "$u $pin"
+  done <<<"$units"
+  exit 0
+fi
 git show "origin/master:$UNIT" > "$tmp/master.hcl" 2>/dev/null || die2 "$UNIT not found on origin master"
 parse_pin "$tmp/master.hcl"
 
