@@ -1,0 +1,245 @@
+# Release a trunk service after its merge queue merged: nothing is rebuilt. In the queue,
+# java-service-image.yml pushed the queue commit as <service>:sha-<7> and pth-sim.yml simulated
+# prod on it; the queue then fast-forwards master to that exact commit, so on push to master
+# github.sha is the simulated commit. This workflow has the CI GitHub App open a deploy PR in
+# the infrastructure repo (input infra-repo) that pins that image's digest in the prod unit
+# (input prod-unit), and tags the
+# image master (same manifest, same digest) only when no prod unit pins :master. Deploying stays
+# a human merge of that PR: while any prod unit in any region pins :master (ECR replication moves
+# the tag everywhere), moving :master would put an unapproved image into prod at the next task
+# start, so :master is left alone (with a warning) until every prod unit pins a digest.
+#
+#   on:
+#     push:
+#       branches: [master]
+#   jobs:
+#     release:
+#       uses: PlantechHubDev/.github/.github/workflows/java-service-release.yml@vX.Y.Z
+#       permissions:
+#         contents: read     # service history for the PR list; commit lookup
+#         id-token: write    # OIDC to AWS (ECR retag)
+#         actions: read      # find the merge_group run for the simulation link
+#       with:
+#         service-name: example-service
+#         role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+#         app-id: ${{ vars.PTH_CI_APP_ID }}
+#         checks-ref: vX.Y.Z   # the same tag, so the job runs this tag's scripts
+#         ci-workflow: ci.yml  # the caller's queue CI workflow file
+#         # The infrastructure repo and its layout: pass them from org or repo variables, so the
+#         # layout is never written in this public repo.
+#         infra-repo: ${{ vars.INFRA_REPO }}
+#         prod-unit: ${{ vars.PROD_UNIT }}
+#         prod-units-pattern: ${{ vars.PROD_UNITS_PATTERN }}
+#       secrets:
+#         app-key: ${{ secrets.PTH_CI_APP_KEY }}
+#
+# Steps, in order: read what the infrastructure repo's master pins now (open-deploy-pr.sh
+# --base-digest: the prod-unit digest, which becomes the PR's rollback digest; --pins: the pin of
+# every prod unit of the service in every region, the paths matching prod-units-pattern) -> pick the sha-<7> digest and retag it master unless a unit
+# pins :master or cannot be parsed (scripts/release-image.sh;
+# a missing sha-<7> image fails the run and opens no PR) -> find the simulation run
+# (scripts/sim-run-url.sh) -> open the deploy PR (scripts/open-deploy-pr.sh, which also writes the
+# step summary). The scripts are covered by scripts/test-ecr-retag.sh and
+# scripts/test-open-deploy-pr.sh.
+#
+# Tokens: the CI App token, limited to the infrastructure repo (contents + pull requests write), for
+# that clone, the branch push, the PR and closing older deploy PRs; the commit is made as the
+# App's bot user. The caller's GITHUB_TOKEN (read) for the service checkout, the commit lookup
+# and the run lookup. AWS access is OIDC only; the role ARN comes from the caller.
+# java-service-publish.yml (develop-first repos) is unchanged.
+
+name: java-service-release
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: The service's repo and ECR repository name, e.g. example-service.
+        type: string
+        required: true
+      role-to-assume:
+        description: IAM role to assume through OIDC for the ECR retag. Pass vars.ECR_PUSH_ROLE_ARN; never write the ARN in a file.
+        type: string
+        required: true
+      app-id:
+        description: The CI GitHub App's ID (pass vars.PTH_CI_APP_ID).
+        type: string
+        required: true
+      checks-ref:
+        description: Ref (normally the same tag as the uses line) to check out PlantechHubDev/.github at, for scripts/*.sh.
+        type: string
+        required: true
+      ci-workflow:
+        description: File name of the caller's merge-queue CI workflow (e.g. ci.yml), whose merge_group run is the simulation link.
+        type: string
+        required: true
+      infra-repo:
+        description: The infrastructure repo the deploy PR goes to, as <owner>/<name>. Pass it from a variable.
+        type: string
+        required: true
+      prod-unit:
+        description: Path, in the infrastructure repo, of the prod unit the deploy PR edits (its pin is the rollback digest). Pass it from a variable.
+        type: string
+        required: true
+      prod-units-pattern:
+        description: ERE matched against the infrastructure repo's `git ls-tree -r --name-only` paths that lists every prod unit of the service, in every region (prod-unit included, or the release fails). Pass it from a variable.
+        type: string
+        required: true
+    secrets:
+      app-key:
+        description: The CI GitHub App's private key.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    concurrency:
+      group: release-${{ inputs.service-name }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Check the inputs
+        id: inputs
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          ROLE: ${{ inputs.role-to-assume }}
+          APP_ID: ${{ inputs.app-id }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+          INFRA_REPO: ${{ inputs.infra-repo }}
+          PROD_UNIT: ${{ inputs.prod-unit }}
+          PROD_UNITS_PATTERN: ${{ inputs.prod-units-pattern }}
+        run: |
+          [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ] || { echo "::error::release runs only on push to master (got $GITHUB_EVENT_NAME $GITHUB_REF)"; exit 1; }
+          printf '%s' "$SERVICE" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || { echo "::error::service-name must be lower-case letters, digits and dashes (got '$SERVICE')"; exit 1; }
+          [ -n "$ROLE" ] || { echo "::error::role-to-assume is empty: pass vars.ECR_PUSH_ROLE_ARN"; exit 1; }
+          [ -n "$APP_ID" ] || { echo "::error::app-id is empty: pass vars.PTH_CI_APP_ID"; exit 1; }
+          printf '%s' "$CI_WORKFLOW" | grep -Eq '^[A-Za-z0-9_.-]+\.ya?ml$' || { echo "::error::ci-workflow must be a workflow file name such as ci.yml (got '$CI_WORKFLOW')"; exit 1; }
+          [[ $INFRA_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::infra-repo must be <owner>/<name> (got '$INFRA_REPO')"; exit 1; }
+          { [ -n "$PROD_UNIT" ] && [[ $PROD_UNIT != /* && $PROD_UNIT != *..* ]]; } || { echo "::error::prod-unit must be a non-empty relative path with no '..' (got '$PROD_UNIT')"; exit 1; }
+          { [ -n "$PROD_UNITS_PATTERN" ] && [[ $PROD_UNITS_PATTERN != /* && $PROD_UNITS_PATTERN != ^/* ]]; } || { echo "::error::prod-units-pattern must be a non-empty ERE over relative paths, not starting with / or ^/ (got '$PROD_UNITS_PATTERN')"; exit 1; }
+          echo "infra-owner=${INFRA_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "infra-name=${INFRA_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the shared scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      # Full history: the deploy PR lists the merge commits since the deployed one.
+      - name: Check out the service
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: service
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mint the App token for the infrastructure repo
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.app-key }}
+          owner: ${{ steps.inputs.outputs.infra-owner }}
+          repositories: ${{ steps.inputs.outputs.infra-name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # No stored credentials: open-deploy-pr.sh fetches and pushes through gh's credential
+      # helper with GH_TOKEN.
+      - name: Check out the infrastructure repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.infra-repo }}
+          ref: master
+          token: ${{ steps.app.outputs.token }}
+          path: infra
+          persist-credentials: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Before any retag: the prod-unit digest (rollback digest), and every region's prod pin.
+      - name: Read what prod is pinned to
+        id: base
+        working-directory: infra
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PROD_UNIT: ${{ inputs.prod-unit }}
+          PROD_UNITS_PATTERN: ${{ inputs.prod-units-pattern }}
+        run: |
+          read -r BASE PIN < <(bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --base-digest "$SERVICE") || exit 1
+          [[ $BASE =~ ^sha256:[0-9a-f]{64}$ && $PIN =~ ^(digest|tag:[A-Za-z0-9_.-]+)$ ]] || { echo "::error::cannot read the prod pin (got '$BASE' '$PIN')"; exit 1; }
+          echo "Rollback digest: $BASE ($PROD_UNIT pin: $PIN)"
+          echo "digest=$BASE" >> "$GITHUB_OUTPUT"
+          bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --pins "$SERVICE" > "$RUNNER_TEMP/prod-pins" || exit 1
+          echo "Prod units:"; cat "$RUNNER_TEMP/prod-pins"
+
+      # Writes digest=, retagged=true|false and held-by= to GITHUB_OUTPUT; skips the retag (with a
+      # warning) while any prod unit pins :master or cannot be parsed.
+      - name: Pick the simulated image; tag it master unless a prod unit pins master
+        id: retag
+        env:
+          SERVICE: ${{ inputs.service-name }}
+        run: bash .pth-checks/scripts/release-image.sh "$SERVICE" "$GITHUB_SHA" < "$RUNNER_TEMP/prod-pins"
+
+      - name: Find the simulation run
+        id: sim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        run: |
+          URL=$(bash .pth-checks/scripts/sim-run-url.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$CI_WORKFLOW") || exit 1
+          echo "Simulation: $URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the App's bot identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          ID=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id) || exit 1
+          [[ $ID =~ ^[0-9]+$ ]] || { echo "::error::bot user id lookup for ${SLUG}[bot] gave '$ID'"; exit 1; }
+          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${ID}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Open the deploy PR
+        working-directory: infra
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          DIGEST: ${{ steps.retag.outputs.digest }}
+          SIM_URL: ${{ steps.sim.outputs.url }}
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          # The PR body says whether :master moved, so the change record is true either way.
+          RETAGGED: ${{ steps.retag.outputs.retagged }}
+          HELD_BY: ${{ steps.retag.outputs.held-by }}
+          DEPLOY_GIT_NAME: ${{ steps.bot.outputs.name }}
+          DEPLOY_GIT_EMAIL: ${{ steps.bot.outputs.email }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SERVICE_GH_TOKEN: ${{ github.token }}
+          INFRA_REPO: ${{ inputs.infra-repo }}
+          PROD_UNIT: ${{ inputs.prod-unit }}
+        # The script writes the step summary: the PR, "already pinned" (no PR, empty stdout), or an
+        # older deploy PR it could not close (exit 1, with the new PR still open).
+        run: |
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no valid image digest from the previous step (got '$DIGEST')"; exit 1; }
+          rc=0
+          URL=$(SERVICE_REPO="$GITHUB_WORKSPACE/service" bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" "$SERVICE" "$DIGEST" "$GITHUB_SHA" "$SIM_URL") || rc=$?
+          if [ -n "$URL" ]; then echo "Deploy PR: $URL"; else echo "No deploy PR opened"; fi
+          exit "$rc"

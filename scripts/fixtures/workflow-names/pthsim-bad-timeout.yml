@@ -1,0 +1,19 @@
+name: pth-sim
+on:
+  workflow_call:
+    inputs:
+      checks-ref:
+        type: string
+        required: true
+jobs:
+  pth-sim:
+    if: github.event_name == 'merge_group'
+    runs-on: [self-hosted, pth-test]
+    timeout-minutes: 120
+    steps:
+      - name: Require a tag
+        env:
+          CHECKS_REF: ${{ inputs.checks-ref }}
+        run: |
+          [[ $CHECKS_REF =~ ^v[0-9]+$ ]] || exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

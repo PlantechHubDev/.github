@@ -49,6 +49,7 @@ jobs:
           done
 
   ci-ok:
+    name: ${{ github.event_name == 'push' && 'ci-ok (push)' || 'ci-ok' }}
     if: always()
     needs: [checks, lint]
     runs-on: ubuntu-latest

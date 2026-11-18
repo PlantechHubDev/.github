@@ -1,0 +1,5 @@
+# actionlint configuration. pth-test: the self-hosted runner that runs
+# pth-sim.yml (the merge queue's prod simulation on the pth-test stack).
+self-hosted-runner:
+  labels:
+    - pth-test
