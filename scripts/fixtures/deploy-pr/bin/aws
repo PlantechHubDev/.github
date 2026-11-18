@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Fake aws for test-open-deploy-pr.sh and test-ecr-retag.sh. Logs argv (one line) to $AWS_LOG.
+#   ecr describe-images ... imageDigest=<d>  tags [sha-<first 7 of $FAKE_COMMIT>] (deployed-sha.sh)
+#   ecr describe-images ... imageTag=<t>     digest $FAKE_TAG_DIGEST, or ImageNotFoundException
+#                                            when FAKE_TAG_DIGEST is empty
+#   ecr batch-get-image                      the image $FAKE_SRC_DIGEST with an OCI index manifest,
+#                                            or a failures entry when FAKE_SRC_MISSING=1
+#   ecr put-image                            echoes the digest back, or fails with the exception
+#                                            named in FAKE_PUT_ERR (exit 254)
+# FAKE_AWS_DENIED=1 makes every call fail with AccessDeniedException.
+echo "$*" >> "${AWS_LOG:-/dev/null}"
+if [ -n "${FAKE_AWS_DENIED:-}" ]; then
+  echo "An error occurred (AccessDeniedException) when calling the $2 operation: denied" >&2; exit 254
+fi
+# arg <name>: the value after the argument <name> (or after "<name>=" inside one argument).
+arg() {
+  local want=$1 prev='' a; shift
+  for a in "$@"; do
+    if [ "$prev" = "$want" ]; then echo "$a"; return; fi
+    case $a in "$want="*) echo "${a#"$want="}"; return ;; esac
+    prev=$a
+  done
+}
+MANIFEST='{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}'
+case "$1 $2" in
+  "ecr describe-images")
+    case "$*" in
+      *imageDigest=*)
+        d=$(arg imageDigest "$@")
+        printf '{"imageDetails":[{"imageDigest":"%s","imageTags":["sha-%s","master"]}]}\n' "$d" "${FAKE_COMMIT:0:7}" ;;
+      *imageTag=*)
+        if [ -z "${FAKE_TAG_DIGEST:-}" ]; then
+          echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation: not found" >&2; exit 254
+        fi
+        printf '{"imageDetails":[{"imageDigest":"%s"}]}\n' "$FAKE_TAG_DIGEST" ;;
+    esac ;;
+  "ecr batch-get-image")
+    if [ -n "${FAKE_SRC_MISSING:-}" ]; then
+      echo '{"images":[],"failures":[{"imageId":{"imageTag":"sha-x"},"failureCode":"ImageNotFound","failureReason":"Requested image not found"}]}'
+    else
+      jq -n --arg d "${FAKE_SRC_DIGEST:?}" --arg m "$MANIFEST" \
+        '{images:[{imageId:{imageDigest:$d,imageTag:"sha-x"},imageManifest:$m,imageManifestMediaType:"application/vnd.oci.image.index.v1+json"}],failures:[]}'
+    fi ;;
+  "ecr put-image")
+    if [ -n "${FAKE_PUT_ERR:-}" ]; then
+      echo "An error occurred ($FAKE_PUT_ERR) when calling the PutImage operation: refused" >&2; exit 254
+    fi
+    d=$(arg --image-digest "$@")
+    printf '{"image":{"imageId":{"imageDigest":"%s","imageTag":"master"}}}\n' "$d" ;;
+  *) echo "fake aws: unexpected call: $*" >&2; exit 99 ;;
+esac

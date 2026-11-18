@@ -1,0 +1,198 @@
+# Release a trunk service after its merge queue merged: nothing is rebuilt. In the queue,
+# java-service-image.yml pushed the queue commit as <service>:sha-<7> and pth-sim.yml simulated
+# prod on it; the queue then fast-forwards master to that exact commit, so on push to master
+# github.sha is the simulated commit. This workflow tags that image master (same manifest, same
+# digest) and has the CI GitHub App open a deploy PR in PlantechHubDev/infrastructure-live that
+# pins the digest in the prod unit. Deploying stays a human merge of that PR.
+#
+#   on:
+#     push:
+#       branches: [master]
+#   jobs:
+#     release:
+#       uses: PlantechHubDev/.github/.github/workflows/java-service-release.yml@vX.Y.Z
+#       permissions:
+#         contents: read     # service history for the PR list; commit lookup
+#         id-token: write    # OIDC to AWS (ECR retag)
+#         actions: read      # find the merge_group run for the simulation link
+#       with:
+#         service-name: orchestration-service
+#         role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+#         app-id: ${{ vars.PTH_CI_APP_ID }}
+#         checks-ref: vX.Y.Z   # the same tag, so the job runs this tag's scripts
+#         ci-workflow: ci.yml  # the caller's queue CI workflow file
+#       secrets:
+#         app-key: ${{ secrets.PTH_CI_APP_KEY }}
+#
+# Steps, in order: read the digest infrastructure-live master pins now (a tag pin is resolved in
+# ECR before the retag moves it; it becomes the PR's rollback digest) -> retag sha-<7> as master
+# (scripts/ecr-retag.sh; a missing sha-<7> image fails the run and opens no PR) -> find the
+# simulation run (scripts/sim-run-url.sh) -> open the deploy PR (scripts/open-deploy-pr.sh).
+# The scripts are covered by scripts/test-ecr-retag.sh and scripts/test-open-deploy-pr.sh.
+#
+# Tokens: the CI App token, limited to infrastructure-live (contents + pull requests write), for
+# that clone, the branch push, the PR and closing older deploy PRs; the commit is made as the
+# App's bot user. The caller's GITHUB_TOKEN (read) for the service checkout, the commit lookup
+# and the run lookup. AWS access is OIDC only; the role ARN comes from the caller.
+# java-service-publish.yml (develop-first repos) is unchanged.
+
+name: java-service-release
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: The service's repo and ECR repository name, e.g. orchestration-service.
+        type: string
+        required: true
+      role-to-assume:
+        description: IAM role to assume through OIDC for the ECR retag. Pass vars.ECR_PUSH_ROLE_ARN; never write the ARN in a file.
+        type: string
+        required: true
+      app-id:
+        description: The CI GitHub App's ID (pass vars.PTH_CI_APP_ID).
+        type: string
+        required: true
+      checks-ref:
+        description: Ref (normally the same tag as the uses line) to check out PlantechHubDev/.github at, for scripts/*.sh.
+        type: string
+        required: true
+      ci-workflow:
+        description: File name of the caller's merge-queue CI workflow (e.g. ci.yml), whose merge_group run is the simulation link.
+        type: string
+        required: true
+    secrets:
+      app-key:
+        description: The CI GitHub App's private key.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    concurrency:
+      group: release-${{ inputs.service-name }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Check the inputs
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          ROLE: ${{ inputs.role-to-assume }}
+          APP_ID: ${{ inputs.app-id }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        run: |
+          [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ] || { echo "::error::release runs only on push to master (got $GITHUB_EVENT_NAME $GITHUB_REF)"; exit 1; }
+          printf '%s' "$SERVICE" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || { echo "::error::service-name must be lower-case letters, digits and dashes (got '$SERVICE')"; exit 1; }
+          [ -n "$ROLE" ] || { echo "::error::role-to-assume is empty: pass vars.ECR_PUSH_ROLE_ARN"; exit 1; }
+          [ -n "$APP_ID" ] || { echo "::error::app-id is empty: pass vars.PTH_CI_APP_ID"; exit 1; }
+          printf '%s' "$CI_WORKFLOW" | grep -Eq '^[A-Za-z0-9_.-]+\.ya?ml$' || { echo "::error::ci-workflow must be a workflow file name such as ci.yml (got '$CI_WORKFLOW')"; exit 1; }
+
+      - name: Check out the shared scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      # Full history: the deploy PR lists the merge commits since the deployed one.
+      - name: Check out the service
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: service
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mint the App token for infrastructure-live
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.app-key }}
+          owner: PlantechHubDev
+          repositories: infrastructure-live
+          permission-contents: write
+          permission-pull-requests: write
+
+      # No stored credentials: open-deploy-pr.sh fetches and pushes through gh's credential
+      # helper with GH_TOKEN.
+      - name: Check out infrastructure-live
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/infrastructure-live
+          ref: master
+          token: ${{ steps.app.outputs.token }}
+          path: infra
+          persist-credentials: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Before the retag: a :master pin must be read while :master is still the deployed image.
+      - name: Read the digest prod is pinned to (rollback digest)
+        id: base
+        working-directory: infra
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          BASE=$(bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --base-digest "$SERVICE") || exit 1
+          echo "Rollback digest: $BASE"
+          echo "digest=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the simulated image master (no rebuild)
+        id: retag
+        env:
+          SERVICE: ${{ inputs.service-name }}
+        run: |
+          DIGEST=$(bash .pth-checks/scripts/ecr-retag.sh "$SERVICE" "sha-${GITHUB_SHA::7}" master) || exit 1
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Find the simulation run
+        id: sim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        run: |
+          URL=$(bash .pth-checks/scripts/sim-run-url.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$CI_WORKFLOW") || exit 1
+          echo "Simulation: $URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the App's bot identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          ID=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id) || exit 1
+          [[ $ID =~ ^[0-9]+$ ]] || { echo "::error::bot user id lookup for ${SLUG}[bot] gave '$ID'"; exit 1; }
+          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${ID}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Open the deploy PR
+        working-directory: infra
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          DIGEST: ${{ steps.retag.outputs.digest }}
+          SIM_URL: ${{ steps.sim.outputs.url }}
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          DEPLOY_GIT_NAME: ${{ steps.bot.outputs.name }}
+          DEPLOY_GIT_EMAIL: ${{ steps.bot.outputs.email }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SERVICE_GH_TOKEN: ${{ github.token }}
+        run: |
+          URL=$(SERVICE_REPO="$GITHUB_WORKSPACE/service" bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" "$SERVICE" "$DIGEST" "$GITHUB_SHA" "$SIM_URL") || exit 1
+          echo "Deploy PR: $URL"
+          echo "Deploy PR for $SERVICE ${GITHUB_SHA::7}: $URL" >> "$GITHUB_STEP_SUMMARY"

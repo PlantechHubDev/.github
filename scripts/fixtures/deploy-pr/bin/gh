@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fake gh for test-open-deploy-pr.sh. Logs argv (one line) to $GH_LOG.
+#   api repos/<org>/<repo>/commits/<ref>   prints $FAKE_COMMIT (deployed-sha.sh's --jq .sha result)
+#   api repos/<repo>/actions/runs?...      prints $FAKE_RUNS (JSON), or exits 1 when FAKE_RUNS_EXIT=1
+#   pr list ...                            prints $FAKE_OPEN_PRS (JSON array; default [])
+#   pr create ... --body-file F            copies F to $GH_BODY, prints $FAKE_NEW_PR_URL
+#   pr edit N ... --body-file F            copies F to $GH_BODY
+#   pr close N ...                         exits 0
+# FAKE_GH_CREATE_EXIT makes pr create fail with that code.
+echo "$*" >> "${GH_LOG:-/dev/null}"
+body_file() { while [ $# -gt 0 ]; do if [ "$1" = --body-file ]; then cp "$2" "${GH_BODY:?}"; return; fi; shift; done; }
+case "$1 $2" in
+  "api repos/"*/commits/*) echo "${FAKE_COMMIT:?}" ;;
+  "api repos/"*/actions/runs*)
+    [ "${FAKE_RUNS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    if [ -n "${FAKE_RUNS:-}" ]; then echo "$FAKE_RUNS"; else echo '{"workflow_runs":[]}'; fi ;;
+  "pr list") echo "${FAKE_OPEN_PRS:-[]}" ;;
+  "pr create")
+    [ -z "${FAKE_GH_CREATE_EXIT:-}" ] || { echo "gh: create failed" >&2; exit "$FAKE_GH_CREATE_EXIT"; }
+    body_file "$@"; echo "${FAKE_NEW_PR_URL:?}" ;;
+  "pr edit") body_file "$@" ;;
+  "pr close") : ;;
+  *) echo "fake gh: unexpected call: $*" >&2; exit 99 ;;
+esac
