@@ -1,0 +1,13 @@
+name: ci
+on:
+  push:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  gate:
+    name: ${{ github.event_name == 'push' && 'ci-ok (push)' || 'ci-ok' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: true

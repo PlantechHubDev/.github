@@ -1,0 +1,8 @@
+name: ci
+on:
+  - push
+jobs:
+  ci-ok:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true

@@ -1,0 +1,14 @@
+name: ci
+on:
+  pull_request:
+  merge_group:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  ci-ok:
+    needs: [checks]
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
