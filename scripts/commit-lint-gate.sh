@@ -13,6 +13,12 @@ esac
 if [ "${EVENT:-}" = merge_group ]; then
   # The queue's branch is named gh-readonly-queue/...: it was checked at PR time.
   # Lint the commits the queue adds on top of the base branch.
+  for v in MG_BASE MG_HEAD; do
+    if [ -z "${!v:-}" ]; then
+      echo "::error::merge_group event without $v: cannot work out the queue's range"
+      exit 1
+    fi
+  done
   lint=true
   range="$MG_BASE..$MG_HEAD"
 elif [ "${EVENT:-}" != pull_request ]; then

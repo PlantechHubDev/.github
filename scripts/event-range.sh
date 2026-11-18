@@ -9,6 +9,12 @@ case "${EVENT:-}" in
   pull_request)
     range="$PR_BASE..$PR_HEAD" ;;
   merge_group)
+    for v in MG_BASE MG_HEAD; do
+      if [ -z "${!v:-}" ]; then
+        echo "::error::merge_group event without $v: cannot work out the queue's range"
+        exit 1
+      fi
+    done
     # The queue's temporary branch: everything it adds on top of the base branch.
     range="$MG_BASE..$MG_HEAD" ;;
   push)

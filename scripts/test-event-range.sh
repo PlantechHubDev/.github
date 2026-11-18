@@ -39,12 +39,29 @@ run "range: merge_group"            0 rng EVENT=merge_group MG_BASE="$A" MG_HEAD
 outputs "range: merge_group range" "range=$A..$B"
 run "range: pull_request"           0 rng EVENT=pull_request PR_BASE="$A" PR_HEAD="$B"
 outputs "range: pull_request range" "range=$A..$B"
-run "range: push before..after"     0 rng EVENT=push BEFORE="$A" AFTER="$B" SHA="$B" DEFAULT_BRANCH=master
-has "range: push unknown old tip falls back" "Range:"
+# A real repo so push can resolve BEFORE: c1 <- c2 on master, c3 on top.
+G=$T/repo; mkdir "$G"
+git -C "$G" init -q -b master
+git -C "$G" -c user.name=t -c user.email=t@t commit -q --allow-empty -m c1
+C1=$(git -C "$G" rev-parse HEAD)
+git -C "$G" -c user.name=t -c user.email=t@t commit -q --allow-empty -m c2
+C2=$(git -C "$G" rev-parse HEAD)
+git -C "$G" update-ref refs/remotes/origin/master "$C1"
+# shellcheck disable=SC2329  # invoked through run
+rng_in_repo() { (cd "$G" && rng "$@"); }
+run "range: push before..after"     0 rng_in_repo EVENT=push BEFORE="$C1" AFTER="$C2" SHA="$C2" DEFAULT_BRANCH=master
+outputs "range: push before..after range" "range=$C1..$C2"
+run "range: push unknown old tip"   0 rng_in_repo EVENT=push BEFORE="$A" AFTER="$C2" SHA="$C2" DEFAULT_BRANCH=master
+outputs "range: unknown old tip falls back" "range=$C2 --not refs/remotes/origin/master"
 run "range: push deleted branch"    0 rng EVENT=push BEFORE="$A" AFTER="$ZERO" SHA="$B" DEFAULT_BRANCH=master
 outputs "range: deleted branch empty range" "range="
 run "range: push new branch"        0 rng EVENT=push BEFORE="$ZERO" AFTER="$B" SHA="$B" DEFAULT_BRANCH=master
 outputs "range: new branch not-on-default" "range=$B --not refs/remotes/origin/master"
+run "range: merge_group empty MG_BASE" 1 rng EVENT=merge_group MG_BASE= MG_HEAD="$B"
+has "range: empty MG_BASE names it" "::error::"
+has "range: empty MG_BASE message" "MG_BASE"
+run "range: merge_group unset MG_HEAD" 1 rng EVENT=merge_group MG_BASE="$A"
+has "range: unset MG_HEAD names it" "MG_HEAD"
 run "range: workflow_dispatch"      1 rng EVENT=workflow_dispatch
 has "range: dispatch message" "supports push, pull_request and merge_group"
 
@@ -52,6 +69,13 @@ has "range: dispatch message" "supports push, pull_request and merge_group"
 run "gate: merge_group"             0 gate EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_BASE="$A" MG_HEAD="$B"
 outputs "gate: merge_group lints" "lint=true"
 outputs "gate: merge_group range" "range=$A..$B"
+run "gate: merge_group ignores branch name" 0 gate EVENT=merge_group HEAD_REF=bad-name MG_BASE="$A" MG_HEAD="$B"
+outputs "gate: bad-name still lints in queue" "lint=true"
+run "gate: merge_group empty MG_HEAD" 1 gate EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_BASE="$A" MG_HEAD=
+has "gate: empty MG_HEAD error" "::error::"
+has "gate: empty MG_HEAD names it" "MG_HEAD"
+run "gate: merge_group unset MG_BASE" 1 gate EVENT=merge_group HEAD_REF="$QUEUE_REF" MG_HEAD="$B"
+has "gate: unset MG_BASE names it" "MG_BASE"
 run "gate: pr good branch"          0 gate EVENT=pull_request HEAD_REF=feat/12-x HEAD_REPO=o/r REPO=o/r AUTHOR=me PR_BASE="$C" PR_HEAD="$D"
 outputs "gate: pr lints" "lint=true"
 outputs "gate: pr range" "range=$C..$D"
