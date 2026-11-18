@@ -10,10 +10,14 @@
 #   <anything>/<service>:master, and there must be at least one. A digest-pinned image, any other
 #   tag (or none), or no container of the repository exits 3 with an ::error:: naming the image:
 #   nothing is written to AWS and nothing in prod changes.
+# - Previous: the digest :master names before the retag (scripts/ecr-existing-digest.sh), for the
+#   deployment comment's previous image and PR range. Empty when there is no :master yet, or when
+#   :master already names the new image (a re-run: the previous one is then unknown).
 # - Retag: sha-<7> is tagged master with scripts/ecr-retag.sh (same manifest, no rebuild). A
 #   re-run on the same merge (master already names that image) exits 0.
 #
-# Prints the digest as the last stdout line, and writes digest=<digest> to GITHUB_OUTPUT when set.
+# Prints the digest as the last stdout line, and writes digest=<digest> and
+# previous-digest=<digest or empty> to GITHUB_OUTPUT when set.
 # AWS: the caller's credentials and region (the release workflow: the OIDC deploy role, us-east-1).
 # Exit: 0 retagged (digest printed); 1 aws failure (no write when the guard's reads fail);
 # 2 sha-<7> not in ECR (never rebuilt); 3 the guard refused (no AWS write); 64 usage.
@@ -56,8 +60,13 @@ if [ -n "$bad" ]; then
   exit 3
 fi
 
+# --- What :master names now (read-only).
+previous=$(bash "$HERE/ecr-existing-digest.sh" "$svc" "$to") \
+  || { echo "::error::release-image: cannot read $svc:$to in ECR; nothing was retagged" >&2; exit 1; }
+
 # --- Retag.
 digest=$(bash "$HERE/ecr-retag.sh" "$svc" "$from" "$to"); rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
-[ -z "${GITHUB_OUTPUT:-}" ] || echo "digest=$digest" >> "$GITHUB_OUTPUT"
+[ "$previous" != "$digest" ] || previous=""
+[ -z "${GITHUB_OUTPUT:-}" ] || { echo "digest=$digest"; echo "previous-digest=$previous"; } >> "$GITHUB_OUTPUT"
 echo "$digest"

@@ -8,7 +8,7 @@
 # tested, so on push to master github.sha is that run's head_sha). Lookup as in sim-run-url.sh.
 # Green means:
 #   - the run is completed with conclusion success;
-#   - no job (latest attempt) concluded failure, cancelled, timed_out or action_required;
+#   - no job (latest attempt, every page) concluded failure, cancelled, timed_out or action_required;
 #   - the jobs ci-ok, image and pth-sim succeeded. A job of a called workflow appears as
 #     "<caller job> / <job>", so each of these names is the group of jobs named exactly that or
 #     starting with "<name> / ". A group passes when it has at least one success and nothing but
@@ -44,8 +44,9 @@ st=$(jq -r '.status // ""' <<<"$run") concl=$(jq -r '.conclusion // ""' <<<"$run
 [ "$st" = completed ] || notgreen "run $url is $st"
 [ "$concl" = success ] || notgreen "run $url concluded ${concl:-nothing}"
 
-jobs=$(gh api "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100") || notgreen "cannot read the jobs of run $url"
-jq -e '.jobs | type == "array"' <<<"$jobs" >/dev/null 2>&1 || notgreen "cannot read the jobs of run $url"
+# Every page: --paginate prints one {"jobs": [...]} object per page.
+pages=$(gh api --paginate "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100") || notgreen "cannot read the jobs of run $url"
+jobs=$(jq -s -c '{jobs: [.[].jobs[]]}' <<<"$pages" 2>/dev/null) || notgreen "cannot read the jobs of run $url"
 bad=$(jq -r '.jobs[] | select(.conclusion as $c | ["failure","cancelled","timed_out","action_required"] | index($c)) | "\(.name) (\(.conclusion))"' <<<"$jobs")
 [ -z "$bad" ] || notgreen "jobs not passed: $(paste -sd, - <<<"$bad" | sed 's/,/, /g')"
 for r in "${REQUIRED[@]}"; do

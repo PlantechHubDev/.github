@@ -23,17 +23,19 @@
 #   deployment  the PRIMARY deployment's rolloutState is COMPLETED, and the service's
 #               runningCount equals its desiredCount
 #   logs        no log event matching ERROR at or after <since-iso> in the log streams of the
-#               PRIMARY deployment's tasks (startedBy = the deployment id), named by the awslogs
-#               convention <awslogs-stream-prefix>/<container name>/<task id>
-#   alarms      no CloudWatch alarm whose name starts with <alarm-prefix> is in state ALARM
+#               PRIMARY deployment's tasks (startedBy = the deployment id), running or stopped
+#               (crash-replaced during the rollout), named by the awslogs convention
+#               <awslogs-stream-prefix>/<container name>/<task id>, 100 streams per call
+#   alarms      at least one CloudWatch alarm's name starts with <alarm-prefix> (else exit 2), and
+#               none of them is in state ALARM
 #
 # AWS: read-only (ecs describe-services, list-tasks, describe-tasks, describe-task-definition;
 # ecr batch-get-image; logs filter-log-events; cloudwatch describe-alarms) with the caller's
 # credentials and region.
 # Output: one "PASS <check>" or "FAIL <check>: <why>" line per check on stdout (and an ::error::
 # per failure on stderr).
-# Exit: 0 all pass; 1 a check failed; 2 an AWS read failed or the log configuration is missing
-# (the checks are then unknown); 64 usage.
+# Exit: 0 all pass; 1 a check failed; 2 an AWS read failed, the log configuration is missing or
+# no alarm has the prefix (the checks are then unknown); 64 usage.
 set -uo pipefail
 usage() {
   echo "post-deploy-checks: $1" >&2
@@ -68,15 +70,24 @@ svc=$(aws ecs describe-services --cluster "$cluster" --services "$service" --out
   || readerr "describe $service"
 jq -e '.services[0]' <<<"$svc" >/dev/null 2>&1 || unknown "$service not found in $cluster"
 primary=$(jq -c '[.services[0].deployments[]? | select(.status == "PRIMARY")][0] // {}' <<<"$svc")
-arns=$(aws ecs list-tasks --cluster "$cluster" --service-name "$service" --desired-status RUNNING --output json 2>"$err") \
-  || readerr "list the tasks of $service"
-ids=()
-while IFS= read -r a; do [ -z "$a" ] || ids+=("$a"); done < <(jq -r '.taskArns[]?' <<<"$arns")
-tasks='{"tasks":[]}'
-if [ "${#ids[@]}" -gt 0 ]; then
-  tasks=$(aws ecs describe-tasks --cluster "$cluster" --tasks "${ids[@]}" --output json 2>"$err") \
-    || readerr "describe the tasks of $service"
-fi
+# tasks_of <RUNNING|STOPPED>: {"tasks": [...]} of the service's tasks in that desired status;
+# describe-tasks takes at most 100 tasks per call.
+tasks_of() {
+  local arns a i out='{"tasks":[]}' page list=()
+  arns=$(aws ecs list-tasks --cluster "$cluster" --service-name "$service" --desired-status "$1" --output json 2>"$err") \
+    || readerr "list the $1 tasks of $service"
+  while IFS= read -r a; do [ -z "$a" ] || list+=("$a"); done < <(jq -r '.taskArns[]?' <<<"$arns")
+  for ((i = 0; i < ${#list[@]}; i += 100)); do
+    page=$(aws ecs describe-tasks --cluster "$cluster" --tasks "${list[@]:i:100}" --output json 2>"$err") \
+      || readerr "describe the tasks of $service"
+    out=$(jq -c -n --argjson a "$out" --argjson b "$page" '{tasks: ($a.tasks + ($b.tasks // []))}')
+  done
+  echo "$out"
+}
+tasks=$(tasks_of RUNNING) || exit 2
+# Tasks the deployment started that have stopped (replaced after a crash during the rollout).
+stopped=$(tasks_of STOPPED) || exit 2
+ntasks=$(jq '.tasks | length' <<<"$tasks")
 td=$(jq -r '.taskDefinition // empty' <<<"$primary")
 [ -n "$td" ] || td=$(jq -r '.services[0].taskDefinition // empty' <<<"$svc")
 [ -n "$td" ] || unknown "$service has no task definition"
@@ -100,7 +111,7 @@ wrong_tasks() {
     | select(($ds | length) == 0 or any($ds[]; . as $d | $ok | index($d) | not))
     | "\(.taskArn | split("/") | last) runs \($ds | join(",") | if . == "" then "no service container" else . end)"' <<<"$tasks"
 }
-if [ "${#ids[@]}" -eq 0 ]; then
+if [ "$ntasks" -eq 0 ]; then
   bad digest "no task of $service is running"
 else
   allowed=$(jq -n -c --arg d "$digest" '[$d]')
@@ -118,7 +129,7 @@ else
     wrong=$(wrong_tasks "$allowed")
   fi
   if [ -n "$wrong" ]; then bad digest "not every task runs $digest (or a child manifest of it): $(paste -sd';' - <<<"$wrong")"
-  else ok "digest (${#ids[@]} tasks run $digest)"; fi
+  else ok "digest ($ntasks tasks run $digest)"; fi
 fi
 
 # --- deployment
@@ -128,11 +139,12 @@ if [ "$rollout" != COMPLETED ]; then bad deployment "the primary deployment is $
 elif [ "$running" != "$desired" ]; then bad deployment "$running of $desired desired tasks running"
 else ok "deployment COMPLETED ($running of $desired tasks)"; fi
 
-# --- logs: only the PRIMARY deployment's tasks' streams.
+# --- logs: only the PRIMARY deployment's tasks' streams, running or stopped.
 pid=$(jq -r '.id // empty' <<<"$primary")
 streams=()
 while IFS= read -r s; do [ -z "$s" ] || streams+=("$s"); done < <(
-  jq -r --arg p "$pid" '.tasks[] | select(.startedBy == $p) | .taskArn | split("/") | last' <<<"$tasks" |
+  jq -r -s --arg p "$pid" '[.[].tasks[] | select(.startedBy == $p) | .taskArn | split("/") | last] | unique | .[]' \
+    <<<"$tasks$stopped" |
   while IFS= read -r t; do awk -v t="$t" '{ print $2 "/" $1 "/" t }' <<<"$mine"; done)
 if [ "${#streams[@]}" -eq 0 ]; then
   bad logs "no task of the primary deployment ${pid:-?} is running, so there is no log stream to check"
@@ -149,11 +161,14 @@ else
   else ok "logs (no ERROR line in ${#streams[@]} new task stream(s) of $group since $since)"; fi
 fi
 
-# --- alarms
-al=$(aws cloudwatch describe-alarms --alarm-name-prefix "$prefix" --state-value ALARM --alarm-types MetricAlarm CompositeAlarm --output json 2>"$err") \
+# --- alarms: the prefix must name alarms (in any state; the CLI pages through them all), and
+# none of them may be in ALARM.
+al=$(aws cloudwatch describe-alarms --alarm-name-prefix "$prefix" --alarm-types MetricAlarm CompositeAlarm --output json 2>"$err") \
   || readerr "read the alarms $prefix*"
+nal=$(jq '[.MetricAlarms[]?, .CompositeAlarms[]?] | length' <<<"$al")
+[ "$nal" -gt 0 ] || unknown "no alarm named $prefix* exists, so the alarm check would pass on nothing: check alarm-prefix"
 alarming=$(jq -r '[.MetricAlarms[]?, .CompositeAlarms[]? | select(.StateValue == "ALARM") | .AlarmName] | join(", ")' <<<"$al")
 if [ -n "$alarming" ]; then bad alarms "in ALARM: $alarming"
-else ok "alarms (none of $prefix* in ALARM)"; fi
+else ok "alarms (none of the $nal alarms $prefix* in ALARM)"; fi
 
 exit "$failed"

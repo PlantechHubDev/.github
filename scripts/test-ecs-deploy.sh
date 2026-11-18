@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests the release's green gate and deploy scripts with the fake aws and gh in
 # scripts/fixtures/ecs-deploy/bin first on PATH, so nothing touches GitHub or AWS:
+#   release-is-tip.sh    the release's commit is still the tip of master (no stale re-run)
 #   queue-run-green.sh   the queue's merge_group run for the merged commit was green
 #   ecs-deploy.sh        force a new deployment, wait for services-stable (no digest check)
 #   post-deploy-checks.sh  digest (or a child of its index), deployment COMPLETED, no ERROR in the new tasks' log streams since, no alarm in ALARM
@@ -16,7 +17,7 @@ export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log FAKE_STATE=$T/state
 mkdir -p "$FAKE_STATE"
 unset FAKE_RUNS FAKE_RUNS_EXIT FAKE_JOBS FAKE_JOBS_EXIT FAKE_TASKS FAKE_PREV_TASKS FAKE_UPDATE_ERR \
   FAKE_WAIT_FAIL FAKE_ROLLOUT FAKE_RUNNING FAKE_DESIRED FAKE_LOG_EVENTS FAKE_ALARMS FAKE_FAIL_OP \
-  FAKE_AWS_DENIED FAKE_COMMENT_EXIT FAKE_TD FAKE_CHILDREN FAKE_INDEX_MISSING FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_TAG_DIGEST GITHUB_OUTPUT GITHUB_STEP_SUMMARY
+  FAKE_AWS_DENIED FAKE_COMMENT_EXIT FAKE_TIP FAKE_TIP_EXIT FAKE_PULLS FAKE_JOBS_PAGE2 FAKE_STOPPED_TASKS FAKE_TD FAKE_CHILDREN FAKE_INDEX_MISSING FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_TAG_DIGEST GITHUB_OUTPUT GITHUB_STEP_SUMMARY
 SVC=example-service
 REPO=PlantechHubDev/$SVC
 A=sha256:$(printf 'a%.0s' $(seq 64))   # the released image
@@ -74,7 +75,7 @@ FAKE_JOBS=$(jobs "${GREEN_JOBS[@]}")
 run "green: exits 0" 0 queue-run-green.sh "$REPO" "$MERGE" ci.yml
 is  "green: prints the run URL" "$out" "https://github.com/$REPO/actions/runs/11"
 logs "green: lists merge_group runs for the merged sha" "$GH_LOG" "api repos/$REPO/actions/runs?event=merge_group&head_sha=$MERGE"
-logs "green: reads that run's jobs" "$GH_LOG" "api repos/$REPO/actions/runs/11/jobs"
+logs "green: reads every page of that run's jobs" "$GH_LOG" "api --paginate repos/$REPO/actions/runs/11/jobs"
 empty "green: no aws call" "$AWS_LOG"
 
 # A job skipped by its own if: for another event (here an extra job) is allowed.
@@ -144,7 +145,33 @@ run "usage: short sha" 64 queue-run-green.sh "$REPO" abc1234 ci.yml
 run "usage: bad repo" 64 queue-run-green.sh "not a repo" "$MERGE" ci.yml
 run "usage: bad workflow" 64 queue-run-green.sh "$REPO" "$MERGE" ci
 empty "usage: no gh call" "$GH_LOG"
+# Jobs on a second page count: the gate pages through them all.
+FAKE_RUNS=$(runs "$(run_json 11 "$MERGE" success)")
+FAKE_JOBS=$(jobs "${GREEN_JOBS[@]}") FAKE_JOBS_PAGE2=$(jobs "$(job 'docs / preview' failure)") \
+  run "page 2: a failed job on the second page exits 1" 1 queue-run-green.sh "$REPO" "$MERGE" ci.yml
+has "page 2: names the failed job" "$err" "docs / preview"
+FAKE_JOBS=$(jobs "${GREEN_JOBS[@]:0:7}" "${GREEN_JOBS[8]}") FAKE_JOBS_PAGE2=$(jobs "${GREEN_JOBS[7]}") \
+  run "page 2: pth-sim on the second page counts" 0 queue-run-green.sh "$REPO" "$MERGE" ci.yml
+FAKE_JOBS=$(jobs "${GREEN_JOBS[@]:0:5}") FAKE_JOBS_PAGE2=$(jobs "${GREEN_JOBS[@]:5}") \
+  run "page 2: the green jobs split over two pages exit 0" 0 queue-run-green.sh "$REPO" "$MERGE" ci.yml
 unset FAKE_RUNS FAKE_JOBS
+
+# ---------------------------------------------------------------- release-is-tip.sh
+# A re-run of an old release run after newer merges would retag an old sha-<7> and deploy it: an
+# unapproved rollback. The release runs only while its commit is the tip of master.
+export FAKE_TIP=$MERGE
+run "tip: release commit is the tip of master exits 0" 0 release-is-tip.sh "$REPO" "$MERGE"
+logs "tip: reads master's tip" "$GH_LOG" "api repos/$REPO/commits/master --jq .sha"
+empty "tip: no aws call" "$AWS_LOG"
+FAKE_TIP=$OTHER run "tip: master moved on exits 1" 1 release-is-tip.sh "$REPO" "$MERGE"
+has "tip: says a rollback needs a revert PR" "$err" "revert PR"
+has "tip: says a rollback needs a change record" "$err" "change record"
+empty "tip: master moved on: nothing retagged (no aws call)" "$AWS_LOG"
+FAKE_TIP_EXIT=1 run "tip: lookup fails exits 2" 2 release-is-tip.sh "$REPO" "$MERGE"
+FAKE_TIP=garbage run "tip: unreadable answer exits 2" 2 release-is-tip.sh "$REPO" "$MERGE"
+run "tip usage: no args" 64 release-is-tip.sh
+run "tip usage: short sha" 64 release-is-tip.sh "$REPO" abc1234
+unset FAKE_TIP
 
 # ---------------------------------------------------------------- ecs-deploy.sh
 # It only forces the deployment and waits; the digest is checked by post-deploy-checks.sh.
@@ -157,8 +184,8 @@ run "deploy: exits 0" 0 ecs-deploy.sh "$CL" "$SV"
 is   "deploy: prints stable <service>" "$(printf '%s\n' "$out" | tail -n 1)" "stable $SV"
 logs "deploy: forces a new deployment of the service" "$AWS_LOG" "ecs update-service --cluster $CL --service $SV --force-new-deployment"
 logs "deploy: waits for services-stable" "$AWS_LOG" "ecs wait services-stable --cluster $CL --services $SV"
-logs "deploy: previous digest in GITHUB_OUTPUT (the :master container, not the sidecar)" "$GITHUB_OUTPUT" "previous-digest=$B"
-is   "deploy: reads before, then update, then wait, nothing after" "$(grep -oE 'list-tasks|describe-tasks|update-service|wait services-stable' "$AWS_LOG" | tr '\n' ,)" "list-tasks,describe-tasks,update-service,wait services-stable,"
+is   "deploy: only update, then wait" "$(cut -d' ' -f1-3 "$AWS_LOG" | tr '\n' ,)" "ecs update-service --cluster,ecs wait services-stable,"
+empty "deploy: writes no output (the previous digest comes from release-image.sh)" "$GITHUB_OUTPUT"
 nologs "deploy: no ECR call" "$AWS_LOG" "ecr "
 FAKE_TASKS="t3 $B $L" run "deploy: does not check the digest (stable is enough)" 0 ecs-deploy.sh "$CL" "$SV"
 
@@ -166,8 +193,6 @@ FAKE_WAIT_FAIL=1 run "deploy: services-stable fails or times out exits 1" 1 ecs-
 has "deploy: says the service did not become stable" "$err" "stable"
 FAKE_UPDATE_ERR=ServiceNotFoundException run "deploy: update-service fails exits 1" 1 ecs-deploy.sh "$CL" "$SV"
 nologs "deploy: update failed, no wait" "$AWS_LOG" "wait services-stable"
-FAKE_FAIL_OP=list-tasks run "deploy: cannot read the running tasks exits 1" 1 ecs-deploy.sh "$CL" "$SV"
-nologs "deploy: cannot read tasks, nothing forced" "$AWS_LOG" "update-service"
 run "deploy usage: no args" 64 ecs-deploy.sh
 run "deploy usage: a third arg" 64 ecs-deploy.sh "$CL" "$SV" "$A"
 run "deploy usage: empty cluster" 64 ecs-deploy.sh "" "$SV"
@@ -177,13 +202,14 @@ empty "deploy usage: no aws call" "$AWS_LOG"
 MERGE_OUT=$T/rerun-output
 : > "$MERGE_OUT"
 : > "$AWS_LOG"; rm -f "$FAKE_STATE/updated"
-rerun=$(FAKE_SRC_DIGEST=$A FAKE_PUT_ERR=ImageAlreadyExistsException GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/release-image.sh" $SVC "$MERGE" "$CL" "$SV" 2>"$T/err"); rc=$?
+rerun=$(FAKE_SRC_DIGEST=$A FAKE_TAG_DIGEST=$A FAKE_PUT_ERR=ImageAlreadyExistsException GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/release-image.sh" $SVC "$MERGE" "$CL" "$SV" 2>"$T/err"); rc=$?
 is "re-run: release-image exits 0 (tags already present)" "$rc" 0
 is "re-run: release-image prints the digest" "$(printf '%s\n' "$rerun" | tail -n 1)" "$A"
 rc=0; FAKE_PREV_TASKS="t3 $A"$'\n'"t4 $A" FAKE_TASKS="t5 $A"$'\n'"t6 $A" GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/ecs-deploy.sh" "$CL" "$SV" >"$T/out" 2>"$T/err" || rc=$?
 is "re-run: ecs-deploy exits 0" "$rc" 0
 logs "re-run: the deployment is forced again" "$AWS_LOG" "ecs update-service --cluster $CL --service $SV --force-new-deployment"
-logs "re-run: previous digest is the image itself" "$MERGE_OUT" "previous-digest=$A"
+logs "re-run: :master already named the image, so the previous digest is unknown (empty)" "$MERGE_OUT" "previous-digest="
+nologs "re-run: previous digest is not the image itself" "$MERGE_OUT" "previous-digest=$A"
 unset FAKE_TASKS FAKE_PREV_TASKS
 
 # ---------------------------------------------------------------- post-deploy-checks.sh
@@ -235,6 +261,20 @@ FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) $OLD ERROR draining" pdc "checks: ERROR li
 FAKE_TASKS="t3 $A $L"$'\n'"t1 $A $L ecs-svc/old" FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) $OLD ERROR draining" \
   pdc "checks: a task of another deployment is not scanned" 0 "${ARGS[@]}"
 logs "checks: only the PRIMARY deployment's streams" "$AWS_LOG" "--log-stream-names $NEW3 --"
+# Tasks of the primary deployment that crashed and were replaced during the rollout are scanned too.
+FAKE_STOPPED_TASKS="t9 $A $L" FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) ecs/app/t9 ERROR crashed" \
+  pdc "checks: ERROR in a STOPPED task of the primary deployment exits 1" 1 "${ARGS[@]}"
+logs "checks: lists the stopped tasks too" "$AWS_LOG" "ecs list-tasks --cluster $CL --service-name $SV --desired-status STOPPED"
+FAKE_STOPPED_TASKS="t8 $B $L ecs-svc/old" FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) ecs/app/t8 ERROR drained" \
+  pdc "checks: ERROR in a STOPPED task of an older deployment exits 0" 0 "${ARGS[@]}"
+FAKE_STOPPED_TASKS="t9 $B $L" pdc "checks: a STOPPED task's digest does not count" 0 "${ARGS[@]}"
+# More than 100 tasks: describe-tasks and the log streams go in chunks of 100.
+MANY=$(for i in $(seq 1 101); do echo "m$i $A $L"; done)
+FAKE_TASKS=$MANY FAKE_RUNNING=101 FAKE_DESIRED=101 pdc "checks: 101 tasks exit 0" 0 "${ARGS[@]}"
+count "checks: 101 running tasks, two describe-tasks calls" "$AWS_LOG" "ecs describe-tasks" 2
+count "checks: 101 streams, two filter-log-events calls" "$AWS_LOG" "logs filter-log-events" 2
+FAKE_TASKS=$MANY FAKE_RUNNING=101 FAKE_DESIRED=101 FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) ecs/app/m101 ERROR last" \
+  pdc "checks: ERROR in the 101st task's stream exits 1" 1 "${ARGS[@]}"
 FAKE_TD='app registry.example.test/example-service:master - -' pdc "checks: no awslogs configuration exits 2" 2 "${ARGS[@]}"
 has "checks: says the log configuration is missing" "$err" "awslogs"
 nologs "checks: never scans the whole group" "$AWS_LOG" "filter-log-events"
@@ -242,6 +282,11 @@ FAKE_TD='app registry.example.test/example-service:master /example/log-group -' 
 has "checks: says the stream prefix is missing" "$err" "awslogs-stream-prefix"
 nologs "checks: no prefix, never scans the whole group" "$AWS_LOG" "filter-log-events"
 FAKE_TD='app registry.example.test/example-service:master /other/group ecs' pdc "checks: app logs to another group exits 2" 2 "${ARGS[@]}"
+FAKE_ALARMS="other-service-prod-cpu:ALARM" pdc "checks: no alarm with the prefix exits 2" 2 "${ARGS[@]}"
+has "checks: says no alarm is named <prefix>*" "$err" "no alarm named ${AP}*"
+FAKE_ALARMS="" pdc "checks: no alarm at all exits 2" 2 "${ARGS[@]}"
+logs "checks: counts the prefix's alarms in any state" "$AWS_LOG" "cloudwatch describe-alarms --alarm-name-prefix $AP --alarm-types"
+nologs "checks: the count is not limited to ALARM" "$AWS_LOG" "--state-value"
 FAKE_ALARMS="${AP}5xx:ALARM" pdc "checks: an alarm in ALARM exits 1" 1 "${ARGS[@]}"
 has "checks: names the alarm" "$out$err" "${AP}5xx"
 FAKE_ROLLOUT=FAILED FAKE_ALARMS="${AP}5xx:ALARM" pdc "checks: every failed check is named" 1 "${ARGS[@]}"
@@ -275,7 +320,10 @@ HEAD12=$(git -C "$S" rev-parse HEAD)
 RUN=https://github.com/$REPO/actions/runs/77
 export SERVICE=$SVC SERVICE_REPO=$S GITHUB_REPOSITORY=$REPO GITHUB_STEP_SUMMARY=$T/summary.md FAKE_COMMIT=$DEPLOYED
 : > "$GITHUB_STEP_SUMMARY"
-dc() { run "$1" "$2" deploy-comment.sh "${@:3}"; }
+# dc: deploy-comment.sh with no comments recorded yet; dc_again keeps the earlier ones (a re-run).
+dc() { rm -f "$FAKE_STATE"/comments-*; run "$1" "$2" deploy-comment.sh "${@:3}"; }
+dc_again() { run "$1" "$2" deploy-comment.sh "${@:3}"; }
+MARK="<!-- pth-deploy:${HEAD12:0:7}:$A -->"
 dc "comment: exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
 logs "comment: resolves the previous digest's commit" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageDigest=$B"
 count "comment: on #11 once" "$GH_LOG" "pr comment 11 " 1
@@ -288,19 +336,45 @@ logs "comment: body has the digest" "$GH_LOG" "$A"
 logs "comment: body has the previous digest" "$GH_LOG" "$B"
 logs "comment: body has the run link" "$GH_LOG" "$RUN"
 logs "comment: body says stable" "$GH_LOG" "stable"
+logs "comment: body has the hidden marker" "$GH_LOG" "$MARK"
+logs "comment: reads the PR's comments for the marker" "$GH_LOG" "api --paginate repos/$REPO/issues/12/comments"
 logs "comment: step summary repeats it" "$GITHUB_STEP_SUMMARY" "$A"
 logs "comment: step summary lists the PRs" "$GITHUB_STEP_SUMMARY" "#12"
-FAKE_COMMIT=$HEAD12 dc "comment: re-run (nothing new) exits 0" 0 "$HEAD12" "$A" "$A" "$RUN"
-nologs "comment: re-run comments on none" "$GH_LOG" "pr comment"
-FAKE_COMMENT_EXIT=1 dc "comment: gh failure exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
-# Previous digest has no sha-<7> tag that resolves: only the merge's own PR is commented on.
+# Idempotent: a re-run finds the marker on both PRs and comments on neither.
+dc_again "comment: re-run exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
+nologs "comment: re-run adds no comment" "$GH_LOG" "pr comment"
+has "comment: re-run says the PRs already carry the comment" "$out$err" "already"
+# Another deploy of another image on the same PRs is a new comment.
+dc_again "comment: another digest on the same PRs exits 0" 0 "$HEAD12" "$B" "$L" "$RUN"
+count "comment: another digest: a new comment on #12" "$GH_LOG" "pr comment 12 " 1
+# Re-run with the previous digest unknown (:master already named the image): the merge's own PR.
+dc "comment: previous unknown exits 0" 0 "$HEAD12" "$A" "" "$RUN"
+count "comment: previous unknown: the merge's own PR" "$GH_LOG" "pr comment 12 " 1
+count "comment: previous unknown: nothing else" "$GH_LOG" "pr comment" 1
+nologs "comment: previous unknown: no ECR lookup" "$AWS_LOG" "describe-images"
+# Previous digest has no sha-<7> tag that resolves: the merge's own PR, with a warning.
 FAKE_COMMIT=nope dc "comment: unknown previous commit still exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
-count "comment: unknown previous: only the merge's own PR" "$GH_LOG" "pr comment 12 " 1
-count "comment: unknown previous: nothing else" "$GH_LOG" "pr comment" 1
-has "comment: unknown previous: warns" "$out$err" "::warning::"
+count "comment: unknown previous commit: only the merge's own PR" "$GH_LOG" "pr comment 12 " 1
+count "comment: unknown previous commit: nothing else" "$GH_LOG" "pr comment" 1
+has "comment: unknown previous commit: warns" "$out$err" "::warning::"
+# The merge's own PR is always included, even when the range would miss it.
+FAKE_COMMIT=$HEAD12 dc "comment: previous resolves to the merge itself exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
+count "comment: previous = merge: the merge's own PR" "$GH_LOG" "pr comment 12 " 1
+# A merge commit whose subject is not "Merge pull request #N": its PRs from the API.
+G -C "$S" commit -q --allow-empty -m "feat: squashed change"
+HEAD13=$(git -C "$S" rev-parse HEAD)
+FAKE_PULLS='[{"number":13}]' dc "comment: own PR from the API exits 0" 0 "$HEAD13" "$A" "" "$RUN"
+logs "comment: asks the API for the commit's PRs" "$GH_LOG" "api repos/$REPO/commits/$HEAD13/pulls"
+count "comment: own PR from the API: #13" "$GH_LOG" "pr comment 13 " 1
+# Nothing to comment on: a deploy with no change record is a failure.
+FAKE_PULLS='[]' dc "comment: no PR at all exits 1" 1 "$HEAD13" "$A" "" "$RUN"
+has "comment: no PR: says so" "$err" "no PR"
+nologs "comment: no PR: no comment" "$GH_LOG" "pr comment"
+FAKE_COMMENT_EXIT=1 dc "comment: gh failure exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
 dc "comment usage: no args" 64
 dc "comment usage: bad digest" 64 "$HEAD12" sha256:x "$B" "$RUN"
 dc "comment usage: bad merge sha" 64 abc "$A" "$B" "$RUN"
+dc "comment usage: bad previous digest" 64 "$HEAD12" "$A" sha256:x "$RUN"
 SERVICE='' dc "comment usage: SERVICE unset" 64 "$HEAD12" "$A" "$B" "$RUN"
 empty "comment usage: no gh call" "$GH_LOG"
 

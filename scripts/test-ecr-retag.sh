@@ -65,7 +65,8 @@ empty "usage: no aws call" "$AWS_LOG"
 MERGE=abc1234$(printf '0%.0s' $(seq 33))
 export GITHUB_OUTPUT=$T/output FAKE_STATE=$T
 CL=example-cluster SV=example-service-prod
-unset FAKE_TD
+unset FAKE_TD FAKE_FAIL_OP
+B=sha256:$(printf 'b%.0s' $(seq 64))
 # rel <name> <want-exit> <args...>
 rel() {
   local name=$1 want=$2; shift 2
@@ -86,6 +87,18 @@ logs "service on :master: from sha-<7>" "$AWS_LOG" "ecr batch-get-image --reposi
 is   "service on :master: digest is the last line" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
 logs "service on :master: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
 hasnt "service on :master: no warning or error" "$out$err" "::"
+# The previous digest (for the deployment comment) is what :master named before the retag.
+FAKE_TAG_DIGEST=$B rel "previous :master: exits 0" 0 $SVC "$MERGE" $CL $SV
+logs "previous :master: previous-digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "previous-digest=$B"
+is   "previous :master: read before the retag" "$(grep -oE 'imageTag=master|put-image' "$AWS_LOG" | tr '\n' ,)" "imageTag=master,put-image,"
+rel "no :master yet: exits 0" 0 $SVC "$MERGE" $CL $SV
+logs "no :master yet: previous-digest empty" "$GITHUB_OUTPUT" "previous-digest="
+nologs "no :master yet: no previous digest named" "$GITHUB_OUTPUT" "previous-digest=sha256"
+FAKE_TAG_DIGEST=$A FAKE_PUT_ERR=ImageAlreadyExistsException rel ":master already the new image (re-run): exits 0" 0 $SVC "$MERGE" $CL $SV
+nologs "re-run: previous digest unknown, not the image itself" "$GITHUB_OUTPUT" "previous-digest=$A"
+logs "re-run: previous-digest empty" "$GITHUB_OUTPUT" "previous-digest="
+FAKE_FAIL_OP=describe-images rel "cannot read :master: exits 1" 1 $SVC "$MERGE" $CL $SV
+writes "cannot read :master: no AWS write" "$AWS_LOG"
 FAKE_TD=$(td "other.registry.test/team/$SVC:master") rel "any registry path to <service>:master: exits 0" 0 $SVC "$MERGE" $CL $SV
 logs "any registry path: retagged" "$AWS_LOG" "put-image"
 
