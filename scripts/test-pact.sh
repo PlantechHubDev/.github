@@ -494,9 +494,43 @@ show_summary_nested_source_layout() {
   reset; rm -rf "${T:?}/sp" "${T:?}/sum"; mkdir -p "$T/sp/default/pacts-consumer-a" "$T/sp/pr-3/pacts-consumer-a" "$T/sum"
   cp "$FIX/consumer-a-provider-b.json" "$T/sp/default/pacts-consumer-a/"; cp "$FIX/consumer-a-provider-b.json" "$T/sp/pr-3/pacts-consumer-a/"
   run "show_summary_nested_source_layout" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
-  has "show_summary_nested_source_layout: counted both" "::error::fetched 2 consumer pacts from consumer-a"
+  has "show_summary_nested_source_layout: default unverified" "::error::fetched 1 consumer pacts from consumer-a under default but the build verified 0"
+  has "show_summary_nested_source_layout: pr-3 unverified" "::error::fetched 1 consumer pacts from consumer-a under pr-3 but the build verified 0"
   echo '::notice::verified 2 active pacts from consumer-a under default' > "$T/sum/summary.txt"
-  run "show_summary_nested_source_layout: verified ok" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  run "show_summary_nested_only_default_verified_fails_pr3" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_nested_only_default_verified_fails_pr3: names pr-3" "under pr-3"
+  hasnt "show_summary_nested_only_default_verified_fails_pr3: default fine" "under default but"
+  printf '%s\n' "::notice::verified 1 active pacts from consumer-a under $T/sp/default" '::notice::verified 1 active pacts from consumer-a under pr-3' > "$T/sum/summary.txt"
+  run "show_summary_nested_verified_ok (trailing folder component matches)" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_provider_name_mismatch_fails() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  run "show_summary_provider_name_mismatch_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b-service
+  has "show_summary_provider_name_mismatch_fails: error" "::error::fetched 1 pacts but none for provider 'provider-b-service' (found: provider-b)"
+}
+show_summary_package_without_provider_warns() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  mkdir -p "$T/sp/pacts-consumer-d"
+  jq '.provider.name = "provider-z" | .consumer.name = "consumer-d"' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-d/consumer-d-provider-z.json"
+  run "show_summary_package_without_provider_warns" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_package_without_provider_warns: warning" "::warning::package pacts-consumer-d holds pacts but none for provider 'provider-b'"
+  hasnt "show_summary_package_without_provider_warns: not the good package" "package pacts-consumer-a holds"
+}
+show_summary_large_n_compares_numerically() {
+  summary_layout 2 '::notice::verified 999999 active pacts from consumer-a under default'
+  run "show_summary_large_n_compares_numerically" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_odd_file_names() {
+  summary_layout 0; rm -rf "${T:?}/sum"; mkdir -p "$T/sum" "$T/sp/pacts-consumer-a/sub dir"
+  cp "$FIX/consumer-a-provider-b.json" "$T/sp/pacts-consumer-a/sub dir/a pact.json"
+  run "show_summary_odd_file_names" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_odd_file_names: counted" "::error::fetched 1 consumer pacts from consumer-a"
+}
+show_summary_rejects_bad_provider() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  run "show_summary_rejects_bad_provider" 2 bash "$SUMMARY" "$T/sum" "$T/sp" 'bad name;x'
+  has "show_summary_rejects_bad_provider: error" "::error::"
+  run "show_summary_rejects_empty_provider" 2 bash "$SUMMARY" "$T/sum" "$T/sp" ''
 }
 show_summary_skips_non_pact_json() {
   summary_layout 0; rm -rf "${T:?}/sum"
@@ -582,4 +616,9 @@ show_summary_nested_source_layout
 show_summary_skips_non_pact_json
 show_summary_bad_consumer_name_fails_closed
 show_summary_caps_verified_digits
+show_summary_provider_name_mismatch_fails
+show_summary_package_without_provider_warns
+show_summary_large_n_compares_numerically
+show_summary_odd_file_names
+show_summary_rejects_bad_provider
 exit $status

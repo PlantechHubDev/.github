@@ -50,7 +50,7 @@ on:
         type: string
         default: v2.3.0
       pact-fetch-consumers:
-        description: Space-separated GHCR package names of consumer contracts (Pact files) this service, as provider, must verify, e.g. "pacts-consumer-a pacts-consumer-b". Each is pulled from its `default` tag into $RUNNER_TEMP/pacts before the build, and PACT_FOLDER points there. Empty (the default) fetches nothing. A package that is unpublished, or has no Actions access grant for this repo, is skipped with a notice.
+        description: Space-separated GHCR package names of consumer contracts (Pact files) this service, as provider, must verify, e.g. "pacts-consumer-a pacts-consumer-b". Each is pulled from its `default` tag into $RUNNER_TEMP/pacts before the build, and PACT_FOLDER points there. The pacts' provider name MUST equal the `service` input (the build fails when pacts were fetched but none name this service). Empty (the default) fetches nothing. A package that is unpublished, or has no Actions access grant for this repo, is skipped with a notice.
         type: string
         default: ''
       pact-gate-providers:
@@ -166,7 +166,9 @@ jobs:
         if: ${{ !cancelled() && inputs.pact-fetch-consumers != '' && steps.pact-fetch.outcome == 'success' }}
         env:
           PROVIDER: ${{ inputs.service }}
-        run: bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact "$RUNNER_TEMP/pacts" "$PROVIDER"
+        run: |
+          [[ $PROVIDER =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::The service input '$PROVIDER' is not a valid provider name"; exit 1; }
+          bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact "$RUNNER_TEMP/pacts" "$PROVIDER"
 
       - name: Upload consumer contracts
         if: always() && inputs.pact-gate-providers != ''
