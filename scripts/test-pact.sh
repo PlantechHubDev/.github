@@ -321,7 +321,7 @@ pull_pr_tags_age_filter() {
   logs "pull_pr_tags_age_filter: young pr tag pulled" "$FAKE_ORAS_LOG" "pacts-consumer-a:pr-3 -o $T/out/pr-3/pacts-consumer-a"
   nologs "pull_pr_tags_age_filter: old pr tag skipped" "$FAKE_ORAS_LOG" "pull ghcr.io/plantechhubdev/pacts-consumer-a:pr-9"
   nologs "pull_pr_tags_age_filter: non-pr tag skipped" "$FAKE_ORAS_LOG" "pull ghcr.io/plantechhubdev/pacts-consumer-a:other"
-  logs "pull_pr_tags_age_filter: default still pulled" "$FAKE_ORAS_LOG" "pacts-consumer-a:default -o $T/out/pacts-consumer-a"
+  logs "pull_pr_tags_age_filter: default pulled into default/" "$FAKE_ORAS_LOG" "pacts-consumer-a:default -o $T/out/default/pacts-consumer-a"
   exists "pull_pr_tags_age_filter: files land in pr dir" "$T/out/pr-3/pacts-consumer-a/consumer-a-provider-b.json"
 }
 pull_pr_tags_unlisted_package_is_notice() {
@@ -348,6 +348,46 @@ push_rejects_bad_tag() {
   run "push_rejects_bad_tag" 2 bash "$PUSH" --tag 'pr-7,default' pacts-consumer-a "$T/pacts" abcdef1234
   has "push_rejects_bad_tag: error" "::error::"
   empty "push_rejects_bad_tag: no oras call" "$FAKE_ORAS_LOG"
+}
+results_null_description_does_not_crash() {
+  results_layout report-pass-fail.json
+  jq '.execution[0].interactions += [{"interaction": {}, "verification": {"result": "OK"}}]' "$FIX/results/report-pass-fail.json" > "$T/rp/default/provider-b.json"
+  run_results "results_null_description_does_not_crash" 0 provider-b "$T/pr" "$T/rp" abc1234
+  if [ "$(stat_of "a request for a thing")" = passed ] && [ "$(stat_of "a request to create a thing")" = failed ]; then pass "results_null_description_does_not_crash: statuses"; else fail "results_null_description_does_not_crash: statuses" "$out $err"; fi
+}
+results_skips_unknown_source_dirs() {
+  results_layout report-pass-fail.json
+  mkdir -p "$T/pr/scratch/pacts-consumer-a"; cp "$FIX/results/consumer-a-provider-b.json" "$T/pr/scratch/pacts-consumer-a/"
+  run_results "results_skips_unknown_source_dirs" 0 provider-b "$T/pr" "$T/rp" abc1234
+  if jq -e 'all(.interactions[]; .source == "default")' <<<"$out" >/dev/null; then pass "results_skips_unknown_source_dirs: only default"; else fail "results_skips_unknown_source_dirs" "$out"; fi
+  if [[ $err == *"::warning::"*scratch* ]]; then pass "results_skips_unknown_source_dirs: warning"; else fail "results_skips_unknown_source_dirs: warning" "$err"; fi
+}
+pull_then_results_compose() {
+  reset; tags_file pacts-consumer-a pr-12 2
+  cp "$FIX/results/consumer-a-provider-b.json" "$T/store/pacts-consumer-a/"
+  run "pull_then_results_compose: pull" 0 bash "$PULL" --pr-tags 14 "$T/out" pacts-consumer-a
+  rm -rf "$T/rp"; mkdir -p "$T/rp/default" "$T/rp/pr-12"
+  cp "$FIX/results/report-pass-fail.json" "$T/rp/default/provider-b.json"
+  cp "$FIX/results/report-all-failed.json" "$T/rp/pr-12/provider-b.json"
+  run_results "pull_then_results_compose" 0 provider-b "$T/out" "$T/rp" abc1234
+  if jq -e '(.interactions | length) == 6' <<<"$out" >/dev/null; then pass "pull_then_results_compose: both sources"; else fail "pull_then_results_compose: count" "$out $err"; fi
+  d=$(jq -r '[.interactions[] | select(.source == "default" and .status == "passed")] | length' <<<"$out")
+  f=$(jq -r '[.interactions[] | select(.source == "pr-12" and .status == "failed")] | length' <<<"$out")
+  if [ "$d" = 1 ] && [ "$f" = 3 ]; then pass "pull_then_results_compose: statuses per source"; else fail "pull_then_results_compose: statuses" "default passed=$d pr-12 failed=$f"; fi
+  case $err in *"No verification report"*) fail "pull_then_results_compose: no spurious warning" "$err" ;; *) pass "pull_then_results_compose: no spurious warning (stderr)" ;; esac
+}
+pull_pr_tags_manifest_not_found_is_notice() {
+  reset; tags_file pacts-consumer-a pr-3 1
+  FAKE_ORAS_MANIFEST_DENIED=1 run "pull_pr_tags_manifest_not_found_is_notice" 0 bash "$PULL" --pr-tags 14 "$T/out" pacts-consumer-a
+  has "pull_pr_tags_manifest_not_found_is_notice: notice" "::notice::pacts-consumer-a:pr-3 manifest not readable"
+}
+push_rejects_non_pr_tags() {
+  reset; export EVENT_DEFAULT_BRANCH=develop GITHUB_REF_NAME=feature/x
+  cp "$FIX/consumer-a-provider-b.json" "$T/pacts/"
+  for t in default sha-abcdef1 other; do
+    run "push_rejects_non_pr_tags: $t" 2 bash "$PUSH" --tag "$t" pacts-consumer-a "$T/pacts" abcdef1234
+  done
+  empty "push_rejects_non_pr_tags: no oras call" "$FAKE_ORAS_LOG"
 }
 
 default_branch_uses_event
@@ -392,4 +432,9 @@ pull_pr_tags_unlisted_package_is_notice
 pull_pr_tags_rejects_bad_days
 push_explicit_tag
 push_rejects_bad_tag
+results_null_description_does_not_crash
+results_skips_unknown_source_dirs
+pull_then_results_compose
+pull_pr_tags_manifest_not_found_is_notice
+push_rejects_non_pr_tags
 exit $status

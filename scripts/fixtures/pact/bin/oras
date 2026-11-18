@@ -18,6 +18,7 @@ case "$cmd" in
     [ -f "$tags" ] || { echo "Error: $ref: not found" >&2; exit 1; }
     if [ "$cmd $2" = "repo tags" ]; then cut -d' ' -f1 "$tags"
     elif [ "$cmd $2" = "manifest fetch" ]; then
+      [ -z "${FAKE_ORAS_MANIFEST_DENIED:-}" ] || { echo "Error response from registry: denied: requested access to the resource is denied" >&2; exit 1; }
       tag=${ref##*:}
       created=$(awk -v t="$tag" '$1 == t { print $2 }' "$tags")
       printf '{"schemaVersion":2,"annotations":{"org.opencontainers.image.created":"%s"}}\n' "$created"

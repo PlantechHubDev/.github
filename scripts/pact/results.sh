@@ -3,7 +3,8 @@
 # Prints the provider's contract results as JSON on stdout:
 #   {"provider","sha","interactions":[{"consumer","source","description","digest","status"}]}
 # status is passed or failed. <pacts-root> has one folder per source (`default`, `pr-<n>`) holding
-# <package>/<consumer>-<provider>.json (the layout oci-pull.sh produces); an interaction's digest is
+# <package>/<consumer>-<provider>.json (the layout oci-pull.sh --pr-tags produces; any other folder
+# name is skipped with a warning); an interaction's digest is
 # digest.sh's. The verification reports are pact-jvm JSON reports (pact.provider.reports=json), one
 # run per source folder, read from <reports-dir>/<source>/*.json. An interaction is passed only when
 # a report lists it (matched by consumer name and description) with verification.result "OK";
@@ -18,6 +19,10 @@ shopt -s nullglob
 entries=()
 for srcdir in "$root"/*/; do
   source=$(basename "$srcdir")
+  if [ "$source" != default ] && ! [[ $source =~ ^pr-[0-9]+$ ]]; then
+    echo "::warning::Skipping $root/$source: a source folder is named default or pr-<n>" >&2
+    continue
+  fi
   repfiles=("$reports/$source"/*.json)
   if [ ${#repfiles[@]} -gt 0 ]; then
     # one array of {consumer, description, result} across every report file for this source
@@ -31,9 +36,9 @@ for srcdir in "$root"/*/; do
     [ "$(jq -r '.provider.name' "$pact")" = "$provider" ] || continue
     consumer=$(jq -r '.consumer.name' "$pact")
     while read -r digest desc; do
-      status=$(jq -r --arg c "$consumer" --arg d "$desc" '[.[] | select(.consumer == $c and (.description | gsub("[\n\r]"; " ")) == $d)]
+      status=$(jq -r --arg c "$consumer" --arg d "$desc" '[.[] | select(.consumer == $c and ((.description // "") | gsub("[\n\r]"; " ")) == $d)]
         | if length > 0 and all(.[]; .result == "OK") then "passed" else "failed" end' <<<"$verified")
-      if [ "$status" = failed ] && ! jq -e --arg c "$consumer" --arg d "$desc" 'any(.[]; .consumer == $c and (.description | gsub("[\n\r]"; " ")) == $d)' <<<"$verified" >/dev/null; then
+      if [ "$status" = failed ] && ! jq -e --arg c "$consumer" --arg d "$desc" 'any(.[]; .consumer == $c and ((.description // "") | gsub("[\n\r]"; " ")) == $d)' <<<"$verified" >/dev/null; then
         echo "::warning::$source: '$desc' ($consumer) is in the pact but not in the verification report; recorded as failed" >&2
       fi
       entries+=("$(jq -n -c --arg c "$consumer" --arg s "$source" --arg d "$desc" --arg g "$digest" --arg st "$status" \

@@ -2,7 +2,9 @@
 # Usage: oci-pull.sh [--pr-tags <days>] <out-dir> <package>...
 # Pulls ghcr.io/plantechhubdev/<package>:default into <out-dir>/<package> for each package.
 # With --pr-tags <days>, also pulls every pr-<n> tag of each package whose manifest annotation
-# org.opencontainers.image.created is under <days> days old into <out-dir>/pr-<n>/<package>
+# org.opencontainers.image.created is under <days> days old into <out-dir>/pr-<n>/<package>, and then
+# the default pull goes to <out-dir>/default/<package> (source folders, as results.sh reads them).
+# Without --pr-tags the layout is <out-dir>/<package>.
 # (tags listed with `oras repo tags`; a package whose tags cannot be listed gets a notice).
 # GHCR answers an unpublished package and one without an Actions access grant the same way
 # (denied / not found), so both print a notice and are skipped. Any other error fails.
@@ -37,8 +39,8 @@ pull_tag() {
   fi
 }
 for package in "$@"; do
-  pull_tag "$package" default "$out/$package"
-  [ -n "$days" ] || continue
+  if [ -z "$days" ]; then pull_tag "$package" default "$out/$package"; continue; fi
+  pull_tag "$package" default "$out/default/$package"
   if ! tags=$(oras repo tags ${auth[@]+"${auth[@]}"} "ghcr.io/plantechhubdev/$package" 2>&1); then
     if grep -qiE 'denied|not found|manifest unknown|name unknown' <<<"$tags"; then
       echo "::notice::$package pr tags not listable (not published yet, or no Actions access grant); skipped"
@@ -48,8 +50,13 @@ for package in "$@"; do
     continue
   fi
   while read -r tag; do
-    if ! manifest=$(oras manifest fetch ${auth[@]+"${auth[@]}"} "ghcr.io/plantechhubdev/$package:$tag" 2>&1); then
-      echo "::error::Fetching $package:$tag manifest failed: $manifest"; rc=1; continue
+    if ! manifest=$(oras manifest fetch ${auth[@]+"${auth[@]}"} "ghcr.io/plantechhubdev/$package:$tag" 2>&1 </dev/null); then
+      if grep -qiE 'denied|not found|manifest unknown' <<<"$manifest"; then
+        echo "::notice::$package:$tag manifest not readable; skipped"
+      else
+        echo "::error::Fetching $package:$tag manifest failed: $manifest"; rc=1
+      fi
+      continue
     fi
     # age in jq (portable; no GNU/BSD date): created is RFC 3339 UTC, fractional seconds dropped
     if jq -e --argjson d "$days" '.annotations["org.opencontainers.image.created"] // empty

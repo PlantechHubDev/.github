@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: oci-push.sh [--tag <tag>] <package> <dir> <sha>
-# With --tag <tag>, pushes only :<tag> (e.g. pr-7), on any branch.
+# With --tag pr-<n>, pushes only that tag, on any branch (default and sha-<7> stay default-branch only).
 # On the default branch, pushes every *.json in <dir> to ghcr.io/plantechhubdev/<package> tagged
 # `default` and `sha-<first 7 of sha>`. Anywhere else, or with no json files, prints a notice and
 # exits 0. Needs oras logged in to ghcr.io (ORAS_REGISTRY_CONFIG, when set, is passed as
@@ -11,7 +11,7 @@ tag=""
 if [ "${1:-}" = "--tag" ]; then
   [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
   tag=$2; shift 2
-  [[ $tag =~ ^pr-[0-9]+$|^[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::Invalid tag '$tag'"; exit 2; }
+  [[ $tag =~ ^pr-[0-9]+$ ]] || { echo "::error::Invalid tag '$tag' (only pr-<n>; default and sha-<7> are pushed from the default branch only)"; exit 2; }
 fi
 [ $# -eq 3 ] || { echo "$usage" >&2; exit 2; }
 package=$1 dir=$2 sha=$3
