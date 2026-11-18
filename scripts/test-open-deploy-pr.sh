@@ -262,7 +262,9 @@ setup terragrunt-digest.hcl
 PROD_UNIT='' run "inputs: PROD_UNIT unset exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
 has "inputs: says PROD_UNIT is needed" "$out" "PROD_UNIT"
 PROD_UNIT=/$UNIT run "inputs: absolute PROD_UNIT exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+has "inputs: absolute PROD_UNIT: path wording" "$out" "PROD_UNIT must be a relative path"
 PROD_UNIT=live/region-a/../region-b/prod/$SVC/terragrunt.hcl run "inputs: PROD_UNIT with .. exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+has "inputs: PROD_UNIT with ..: path wording" "$out" "PROD_UNIT must not contain '..'"
 INFRA_REPO='' run "inputs: INFRA_REPO unset exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
 has "inputs: says INFRA_REPO is needed" "$out" "INFRA_REPO"
 INFRA_REPO=infra-example run "inputs: INFRA_REPO without owner exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
@@ -272,8 +274,12 @@ PROD_UNIT='' run "inputs: --base-digest needs PROD_UNIT" 64 --base-digest $SVC
 PROD_UNITS_PATTERN='' INFRA_REPO='' run "inputs: --base-digest needs neither the pattern nor INFRA_REPO" 0 --base-digest $SVC
 PROD_UNITS_PATTERN='' run "inputs: --pins needs PROD_UNITS_PATTERN" 64 --pins $SVC
 has "inputs: says PROD_UNITS_PATTERN is needed" "$out" "PROD_UNITS_PATTERN"
-PROD_UNITS_PATTERN="^live/\.\./prod/$SVC/terragrunt\\.hcl\$" run "inputs: pattern with .. exits 64" 64 --pins $SVC
+# ".." in an ERE is two any-characters, and matched git paths never contain "..": allowed.
+PROD_UNITS_PATTERN="^live/regio..a/prod/$SVC/terragrunt\\.hcl\$" run "inputs: pattern with .. (any two chars) is allowed" 0 --pins $SVC
+is "inputs: pattern with .. matches the unit" "$so" "$UNIT digest"
 PROD_UNITS_PATTERN="^/live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" run "inputs: absolute pattern exits 64" 64 --pins $SVC
+has "inputs: absolute pattern: pattern wording" "$out" "PROD_UNITS_PATTERN must not start with / or ^/"
+PROD_UNITS_PATTERN="/live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" run "inputs: pattern starting with / exits 64" 64 --pins $SVC
 PROD_UNIT='' run "inputs: --pins needs PROD_UNIT" 64 --pins $SVC
 has "inputs: --pins says PROD_UNIT is needed" "$out" "PROD_UNIT"
 INFRA_REPO='' run "inputs: --pins does not need INFRA_REPO" 0 --pins $SVC

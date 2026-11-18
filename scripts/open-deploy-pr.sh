@@ -39,7 +39,8 @@
 #                     prod-unit. --pins exits 2 unless it is one of the matched units
 #   PROD_UNITS_PATTERN  ERE over `git ls-tree -r --name-only` paths that matches every prod unit
 #                     of the service (required with --pins): the caller's input prod-units-pattern
-#                     Both must be non-empty and relative (no leading /), with no "..".
+#                     PROD_UNIT must be a non-empty relative path with no ".."; the pattern must be
+#                     non-empty and must not start with / or ^/ (it may contain "..").
 #   INFRA_REPO        <owner>/<name> of the infrastructure repo (required to open the PR): the
 #                     caller's input infra-repo
 #   SERVICE_REPO      path to a full-history checkout of PlantechHubDev/<service> (required)
@@ -99,17 +100,17 @@ else
     || usage "SERVICE_REPO must be a checkout of $ORG/$svc (got '${SERVICE_REPO:-}')"
 fi
 [[ $svc =~ ^[a-z0-9][a-z0-9-]*$ ]] || usage "bad service name '$svc'"
-# relpath <name> <value>: a non-empty relative path (or path pattern) with no "..". Backslashes
-# are dropped first, so an escaped \.\. in a pattern counts as "..".
-relpath() {
-  local v=${2//\\/}
-  [ -n "$2" ] || usage "$1 is not set: pass the caller's input"
-  [[ $v != /* && $v != ^/* ]] || usage "$1 must be a relative path (got '$2')"
-  [[ $v != *..* ]] || usage "$1 must not contain '..' (got '$2')"
-}
-relpath PROD_UNIT "${PROD_UNIT:-}"
+# PROD_UNIT: a non-empty relative path with no "..".
+[ -n "${PROD_UNIT:-}" ] || usage "PROD_UNIT is not set: pass the caller's input prod-unit"
+[[ $PROD_UNIT != /* ]] || usage "PROD_UNIT must be a relative path (got '$PROD_UNIT')"
+[[ $PROD_UNIT != *..* ]] || usage "PROD_UNIT must not contain '..' (got '$PROD_UNIT')"
 UNIT=$PROD_UNIT
-$pins_mode && relpath PROD_UNITS_PATTERN "${PROD_UNITS_PATTERN:-}"
+# PROD_UNITS_PATTERN: a non-empty ERE over relative paths. ".." is allowed (in an ERE it is two
+# any-characters, and the matched git paths never contain "..").
+if $pins_mode; then
+  [ -n "${PROD_UNITS_PATTERN:-}" ] || usage "PROD_UNITS_PATTERN is not set: pass the caller's input prod-units-pattern"
+  [[ $PROD_UNITS_PATTERN != /* && $PROD_UNITS_PATTERN != ^/* ]] || usage "PROD_UNITS_PATTERN must not start with / or ^/: it is matched against relative paths (got '$PROD_UNITS_PATTERN')"
+fi
 if ! $pins_mode && ! $base_mode; then
   [[ ${INFRA_REPO:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || usage "INFRA_REPO must be <owner>/<name> of the infrastructure repo (got '${INFRA_REPO:-}')"
   REPO=$INFRA_REPO

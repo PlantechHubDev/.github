@@ -124,10 +124,8 @@ jobs:
           [ -n "$APP_ID" ] || { echo "::error::app-id is empty: pass vars.PTH_CI_APP_ID"; exit 1; }
           printf '%s' "$CI_WORKFLOW" | grep -Eq '^[A-Za-z0-9_.-]+\.ya?ml$' || { echo "::error::ci-workflow must be a workflow file name such as ci.yml (got '$CI_WORKFLOW')"; exit 1; }
           [[ $INFRA_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::infra-repo must be <owner>/<name> (got '$INFRA_REPO')"; exit 1; }
-          for v in PROD_UNIT PROD_UNITS_PATTERN; do
-            val=${!v}; bare=${val//\\/}
-            { [ -n "$val" ] && [[ $bare != /* && $bare != ^/* && $bare != *..* ]]; } || { echo "::error::$v (input $(echo "$v" | tr 'A-Z_' 'a-z-')) must be a non-empty relative path with no '..' (got '$val')"; exit 1; }
-          done
+          { [ -n "$PROD_UNIT" ] && [[ $PROD_UNIT != /* && $PROD_UNIT != *..* ]]; } || { echo "::error::prod-unit must be a non-empty relative path with no '..' (got '$PROD_UNIT')"; exit 1; }
+          { [ -n "$PROD_UNITS_PATTERN" ] && [[ $PROD_UNITS_PATTERN != /* && $PROD_UNITS_PATTERN != ^/* ]]; } || { echo "::error::prod-units-pattern must be a non-empty ERE over relative paths, not starting with / or ^/ (got '$PROD_UNITS_PATTERN')"; exit 1; }
           echo "infra-owner=${INFRA_REPO%%/*}" >> "$GITHUB_OUTPUT"
           echo "infra-name=${INFRA_REPO#*/}" >> "$GITHUB_OUTPUT"
 
