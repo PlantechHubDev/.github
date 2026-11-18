@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fake aws for test-ecs-deploy.sh. Logs argv (one line) to $AWS_LOG. ecr calls go to the
+# deploy-pr fake (same log). Every other call reads the environment:
+#   ecs list-tasks / describe-tasks  the running tasks: $FAKE_TASKS, or $FAKE_PREV_TASKS (default
+#       $FAKE_TASKS) until update-service has run (marker file $FAKE_STATE/updated). One task per
+#       line, "<task-id> <digest> [<sidecar digest>]": the first container's image is
+#       registry.example.test/example-service:master, the second log-router:stable.
+#   ecs update-service               writes the marker; fails when FAKE_UPDATE_ERR names an exception
+#   ecs wait services-stable         exit 255 (waiter failed) when FAKE_WAIT_FAIL=1
+#   ecs describe-services            one PRIMARY deployment, rolloutState $FAKE_ROLLOUT (default
+#       COMPLETED); runningCount $FAKE_RUNNING (default 2), desiredCount $FAKE_DESIRED (default 2)
+#   logs filter-log-events           $FAKE_LOG_EVENTS lines "<epoch-ms> <message>", keeping those at
+#       or after --start-time whose message contains --filter-pattern
+#   cloudwatch describe-alarms       $FAKE_ALARMS, space-separated "<name>:<state>", filtered by
+#       --alarm-name-prefix and --state-value when given
+# FAKE_FAIL_OP=<operation> (e.g. describe-services) makes that operation fail with
+# AccessDeniedException; FAKE_AWS_DENIED=1 makes every call fail.
+if [ "${1-}" = ecr ]; then exec bash "$(dirname "$0")/../../deploy-pr/bin/aws" "$@"; fi
+echo "$*" >> "${AWS_LOG:-/dev/null}"
+op=$2
+[ "$1" = ecs ] && [ "$2" = wait ] && op="wait $3"
+if [ -n "${FAKE_AWS_DENIED:-}" ] || [ "${FAKE_FAIL_OP:-}" = "$op" ]; then
+  echo "An error occurred (AccessDeniedException) when calling the $op operation: denied" >&2; exit 254
+fi
+arg() {
+  local want=$1 prev='' a; shift
+  for a in "$@"; do
+    if [ "$prev" = "$want" ]; then echo "$a"; return; fi
+    prev=$a
+  done
+}
+tasks() {
+  if [ -e "${FAKE_STATE:?}/updated" ]; then printf '%s\n' "${FAKE_TASKS-}"; else printf '%s\n' "${FAKE_PREV_TASKS-${FAKE_TASKS-}}"; fi
+}
+case "$1 $op" in
+  "ecs list-tasks")
+    tasks | awk 'NF { print "task/example-cluster/" $1 }' | jq -R . | jq -s '{taskArns: .}' ;;
+  "ecs describe-tasks")
+    tasks | awk 'NF' | while read -r id d s; do
+      jq -n --arg id "$id" --arg d "$d" --arg s "${s:-}" '{taskArn: ("task/example-cluster/" + $id), lastStatus: "RUNNING",
+        containers: ([{name: "app", image: "registry.example.test/example-service:master", imageDigest: $d}]
+          + (if $s == "" then [] else [{name: "log-router", image: "registry.example.test/log-router:stable", imageDigest: $s}] end))}'
+    done | jq -s '{tasks: ., failures: []}' ;;
+  "ecs update-service")
+    if [ -n "${FAKE_UPDATE_ERR:-}" ]; then
+      echo "An error occurred ($FAKE_UPDATE_ERR) when calling the UpdateService operation: refused" >&2; exit 254
+    fi
+    : > "${FAKE_STATE:?}/updated"
+    echo '{"service":{"serviceName":"x"}}' ;;
+  "ecs wait services-stable")
+    if [ -n "${FAKE_WAIT_FAIL:-}" ]; then echo "Waiter ServicesStable failed: Max attempts exceeded" >&2; exit 255; fi ;;
+  "ecs describe-services")
+    jq -n --arg r "${FAKE_ROLLOUT:-COMPLETED}" --argjson run "${FAKE_RUNNING:-2}" --argjson want "${FAKE_DESIRED:-2}" \
+      '{services: [{serviceName: "svc", desiredCount: $want, runningCount: $run,
+        deployments: [{id: "ecs-svc/1", status: "PRIMARY", rolloutState: $r, desiredCount: $want, runningCount: $run}]}], failures: []}' ;;
+  "logs filter-log-events")
+    start=$(arg --start-time "$@") pat=$(arg --filter-pattern "$@")
+    printf '%s\n' "${FAKE_LOG_EVENTS-}" | awk 'NF' | while read -r ts msg; do
+      if [ "$ts" -ge "${start:-0}" ] && [[ $msg == *"$pat"* ]]; then
+        jq -n --argjson t "$ts" --arg m "$msg" '{timestamp: $t, message: $m, logStreamName: "app/x"}'
+      fi
+    done | jq -s '{events: .}' ;;
+  "cloudwatch describe-alarms")
+    prefix=$(arg --alarm-name-prefix "$@") state=$(arg --state-value "$@")
+    for a in ${FAKE_ALARMS-}; do
+      n=${a%%:*} s=${a#*:}
+      [[ $n == "$prefix"* ]] || continue
+      [ -z "$state" ] || [ "$s" = "$state" ] || continue
+      jq -n --arg n "$n" --arg s "$s" '{AlarmName: $n, StateValue: $s}'
+    done | jq -s '{MetricAlarms: ., CompositeAlarms: []}' ;;
+  *) echo "fake aws: unexpected call: $*" >&2; exit 99 ;;
+esac
