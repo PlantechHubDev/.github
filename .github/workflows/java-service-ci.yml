@@ -136,6 +136,7 @@ jobs:
           persist-credentials: false
 
       - name: Fetch consumer contracts
+        id: pact-fetch
         if: inputs.pact-fetch-consumers != ''
         env:
           CONSUMERS: ${{ inputs.pact-fetch-consumers }}
@@ -162,8 +163,10 @@ jobs:
       # build/reports/pact/*.txt; this step prints them as annotations and fails the job when pacts
       # were fetched but summary.txt does not report that many verified (not continue-on-error).
       - name: Show contract verification summary
-        if: always() && inputs.pact-fetch-consumers != ''
-        run: bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact "$RUNNER_TEMP/pacts"
+        if: ${{ !cancelled() && inputs.pact-fetch-consumers != '' && steps.pact-fetch.outcome == 'success' }}
+        env:
+          PROVIDER: ${{ inputs.service }}
+        run: bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact "$RUNNER_TEMP/pacts" "$PROVIDER"
 
       - name: Upload consumer contracts
         if: always() && inputs.pact-gate-providers != ''
