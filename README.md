@@ -22,6 +22,9 @@ Org-wide defaults and shared checks for every PlantechHubDev repo.
 | `.pre-commit-config.yaml`, `.gitleaks.toml` | This repo's own hooks and gitleaks config. Every repo has the same two files. |
 | `.github/workflows/java-service-ci.yml` | Reusable build for a java service. On `merge_group` the diff-cover gate is skipped (the ratchet still runs). Jobs: `test` (no committed `mavenLocal()`, then Gradle `clean build`; skipped on Dependabot runs) and `image-scan` (image built from `test`'s jar, Trivy CRITICAL/HIGH with `.trivyignore`). Inputs `service`, `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
 | `.github/workflows/java-service-publish.yml` | Reusable publish for a java service. Job `build-push`: Gradle `clean build`, then a linux/amd64 + linux/arm64 image to ECR only, tagged `:<branch>` and `:sha-<7>`, through OIDC. Inputs `service`, `java-version`, `ecr-role-arn` (pass `vars.ECR_PUSH_ROLE_ARN`), `mysql-test-image`; secrets `PUBLISH_TOKEN`, optional `TEAMS_WEBHOOK_URI`. |
+| `.github/workflows/java-service-image.yml` | Reusable queue image for a trunk java service: builds the exact merge-queue commit and pushes it to ECR as `:sha-<7>` through OIDC. Jobs `check` (finds an existing image), `build` (Gradle with no AWS credentials, then push), `result`. Output `digest` (`sha256:<64 hex>`); callers `needs` the workflow job and read its `digest`. Inputs `service-name`, `role-to-assume` (pass `vars.ECR_PUSH_ROLE_ARN`), `checks-ref`, `java-version`, `mysql-test-image`; secret `packages-read-token`. |
+| `.github/workflows/pth-sim.yml` | Reusable prod simulation in the merge queue: the full platform-tests suite on the queue image, on the self-hosted `pth-test` runner. Job `pth-sim`. Inputs `service-name`, `digest`, `checks-ref`. Work is in `scripts/pth-sim.sh`. |
+| `.github/workflows/java-service-release.yml` | Reusable release for a trunk java service, on the caller's push to `master`. Nothing is rebuilt: it retags the queue image `:master` only when no prod unit pins `:master`, and has the CI App open the `infrastructure-live` deploy PR that pins the image digest. Inputs `service-name`, `role-to-assume`, `app-id`, `checks-ref`, `ci-workflow`; secret `app-key`. |
 | `.github/workflows/java-library-ci.yml` | Reusable build for a java library. Job `test` (no committed `mavenLocal()`, then Gradle `clean build`; skipped on Dependabot runs). No `version-check` from v2.0.0: versions are computed at release. Inputs `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
 | `.github/workflows/java-library-publish.yml` | Reusable release for a java library, on a push to its release branch. Job `publish-package`: git-cliff with `cliff.toml` computes the version `V` from the commits since the last `vX.Y.Z` tag; never overwrites (a published `V` is skipped only when `v<V>` is on this commit, else the job fails); `RELEASE_VERSION=V` build and `gradle publish`; annotated tag `v<V>`; GitHub Release with git-cliff's notes and the Maven coordinates. Never prunes old versions. Caller grants `contents: write`, `packages: write`. Inputs `artifact-id`, `checks-ref`, `release-branch`, `java-version`, `mysql-test-image`, `git-cliff-version`, `git-cliff-sha256`; secrets `PUBLISH_TOKEN`, optional `LIBRARY_WEBHOOK_URI`. |
 | `cliff.toml` | git-cliff config for library releases: `tag_pattern` `^v[0-9]+\.[0-9]+\.[0-9]+$`; breaking → major (also from 0.x), `feat` → minor, anything else → patch; notes list each commit's `Refs:`. |
@@ -81,6 +84,127 @@ repos:
 ```
 
 Install once per clone (every worktree of the clone inherits the hooks): `brew install pre-commit`, then `pre-commit install` in the clone. Hooks are advisory (`--no-verify` and web edits skip them); CI is the gate.
+
+## Trunk repos (merge queue)
+
+A trunk repo merges through a GitHub merge queue into `master` instead of `develop` first. The queue builds the exact commit it will merge, simulates prod on it and, after the merge, a release workflow opens the deploy PR for that same image. The `ci.yml` below runs on `pull_request` and `merge_group` only; it MUST NOT run on `push`, so a push run can never produce a `ci-ok` that satisfies the PR's required check (`scripts/test-workflow-names.sh` checks this example and every workflow here).
+
+`ci.yml`: `checks`, `test` and `paired-tests` always; `image` and `pth-sim` only in the queue, with `pth-sim` taking `image`'s `digest`. `ci-ok` covers all of them, and `allowed-skips: image, pth-sim` lets a `pull_request` run pass without them.
+
+```yaml
+# ci.yml
+name: ci
+
+on:
+  pull_request:
+    branches: [master]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.event.merge_group.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    uses: PlantechHubDev/.github/.github/workflows/checks.yml@v2.4.0
+    with:
+      checks-ref: v2.4.0
+
+  test:
+    uses: PlantechHubDev/.github/.github/workflows/java-service-ci.yml@v2.4.0
+    permissions:
+      contents: read
+      checks: write
+      packages: read
+    with:
+      service: orchestration-service
+      checks-ref: v2.4.0
+    secrets:
+      PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+
+  paired-tests:
+    uses: PlantechHubDev/.github/.github/workflows/paired-tests.yml@v2.4.0
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      checks-ref: v2.4.0
+      app-id: ${{ vars.PTH_CI_APP_ID }}
+    secrets:
+      PTH_CI_APP_KEY: ${{ secrets.PTH_CI_APP_KEY }}
+
+  image:
+    if: github.event_name == 'merge_group'
+    uses: PlantechHubDev/.github/.github/workflows/java-service-image.yml@v2.4.0
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    with:
+      service-name: orchestration-service
+      role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+      checks-ref: v2.4.0
+    secrets:
+      packages-read-token: ${{ secrets.PUBLISH_TOKEN }}
+
+  pth-sim:
+    if: github.event_name == 'merge_group'
+    needs: image
+    uses: PlantechHubDev/.github/.github/workflows/pth-sim.yml@v2.4.0
+    permissions:
+      contents: read
+    with:
+      service-name: orchestration-service
+      digest: ${{ needs.image.outputs.digest }}
+      checks-ref: v2.4.0
+
+  ci-ok:
+    if: always()
+    needs: [checks, test, paired-tests, image, pth-sim]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs passed
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
+          allowed-skips: image, pth-sim
+```
+
+`release.yml`: on the push the queue's fast-forward makes to `master`, `github.sha` is the commit the queue built and simulated, so nothing is rebuilt.
+
+```yaml
+# release.yml
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: PlantechHubDev/.github/.github/workflows/java-service-release.yml@v2.4.0
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    with:
+      service-name: orchestration-service
+      role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+      app-id: ${{ vars.PTH_CI_APP_ID }}
+      checks-ref: v2.4.0
+      ci-workflow: ci.yml
+    secrets:
+      app-key: ${{ secrets.PTH_CI_APP_KEY }}
+```
+
+What a caller needs, by name only: org or repo variables `vars.ECR_PUSH_ROLE_ARN` and `vars.PTH_CI_APP_ID`, and secrets `secrets.PTH_CI_APP_KEY` and `secrets.PUBLISH_TOKEN`. The `pth-test` self-hosted runner, the `trunk` ruleset (required check `ci-ok`, merge queue) and the merge queue settings are configured outside this repo: see the engineering handbook and the org rulesets.
 
 ## Releasing and adopting a new tag
 
