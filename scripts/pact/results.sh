@@ -5,7 +5,8 @@
 # status is passed or failed. <pacts-root> has one folder per source (`default`, `pr-<n>`) holding
 # <package>/<consumer>-<provider>.json (the layout oci-pull.sh --pr-tags produces; any other folder
 # name is skipped with a warning); an interaction's digest is
-# digest.sh's. The verification reports are pact-jvm JSON reports (pact.provider.reports=json), one
+# digest.sh's. The verification reports are pact-jvm JSON reports (pact.verification.reports=console,json,
+# pact.verification.reportDir=<reports-dir>/<source>; pact-jvm merges a run into one <provider>.json), one
 # run per source folder, read from <reports-dir>/<source>/*.json. An interaction is passed only when
 # a report lists it (matched by consumer name and description) with verification.result "OK";
 # absent from every report, it is failed and a ::warning:: is printed (fail-closed). Failures never

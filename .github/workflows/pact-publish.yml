@@ -12,10 +12,11 @@
 #       package: pacts-consumer-a
 #
 # Job publish: looks for the artifact in this run (a notice and no push when it is absent; a failed
-# download fails the job), then on the
-# default branch pushes the *.json files to ghcr.io/plantechhubdev/<package> tagged `default`
-# and `sha-<7>`. Other branches only print a notice. With input `tag` (pr-<n> only), only that tag is pushed, on any branch. The package needs a "Manage Actions access"
-# grant for the consumer repo (Write), and one for each provider repo (Read).
+# download fails the job). With `tag` empty it pushes only on the default branch, the *.json files to
+# ghcr.io/plantechhubdev/<package> tagged `default` and `sha-<7>`; on other branches it prints a notice
+# and skips the install, login and push. With input `tag` (pr-<n> only) it pushes only that tag, on any
+# branch. The package needs a "Manage Actions access" grant for the consumer repo (Write), and one for
+# each provider repo (Read).
 
 name: pact-publish
 
@@ -83,26 +84,41 @@ jobs:
             echo "::notice::No '$ARTIFACT' artifact in this run; no contracts to publish"
           fi
 
+      # With no tag, only the default branch publishes; other branches skip before any write token is handled.
+      - name: Decide whether to publish
+        id: branch
+        env:
+          TAG: ${{ inputs.tag }}
+          EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$TAG" ] || [ "$GITHUB_REF_NAME" = "$(bash .pth-checks/scripts/pact/default-branch.sh)" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Not publishing: $GITHUB_REF_NAME is not the default branch and no tag was given"
+          fi
+
       - name: Download the contract files
-        if: steps.find.outputs.found == 'true'
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.artifact }}
           path: pacts
 
       - name: Install oras
-        if: steps.find.outputs.found == 'true'
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
         run: bash .pth-checks/scripts/pact/install-oras.sh
 
       - name: Log in to GHCR
-        if: steps.find.outputs.found == 'true'
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           printf %s "$TOKEN" | oras login --registry-config "$RUNNER_TEMP/oras-auth.json" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Push the contract files
-        if: steps.find.outputs.found == 'true'
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
         env:
           PACKAGE: ${{ inputs.package }}
           TAG: ${{ inputs.tag }}

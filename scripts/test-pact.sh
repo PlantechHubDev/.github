@@ -9,7 +9,7 @@ export PATH="$FIX/bin:$PATH"
 T=$(mktemp -d); trap 'rm -rf "${T:?}"' EXIT
 export FAKE_ORAS_LOG=$T/oras.log FAKE_GH_LOG=$T/gh.log FAKE_ORAS_STORE=$T/store
 export GITHUB_REPOSITORY=example-org/consumer-a
-unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
+unset FAKE_ORAS_CMDNOTFOUND EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
 status=0
 
 pass() { echo "PASS $1"; }
@@ -20,7 +20,7 @@ reset() {
   mkdir -p "$T/store/pacts-consumer-a" "$T/store/pacts-consumer-b" "$T/pacts"
   cp "$FIX/consumer-a-provider-b.json" "$T/store/pacts-consumer-a/"
   cp "$FIX/consumer-a-provider-b.json" "$T/store/pacts-consumer-b/"
-  unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
+  unset FAKE_ORAS_CMDNOTFOUND EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
 }
 # run <name> <want-exit> <cmd...>: output (stdout+stderr) in $out.
 run() {
@@ -389,6 +389,40 @@ push_rejects_non_pr_tags() {
   done
   empty "push_rejects_non_pr_tags: no oras call" "$FAKE_ORAS_LOG"
 }
+gate_malformed_new_pact_fails() {
+  reset; printf '{not json' > "$T/bad.json"; results "$T/r.json" "x:passed"
+  run "gate_malformed_new_pact_fails" 1 gate provider-b "$T/bad.json" "$G/base.json" "$T/r.json"
+  has "gate_malformed_new_pact_fails: error" "::error::"
+}
+gate_empty_new_pact_fails() {
+  reset; : > "$T/empty.json"; results "$T/r.json" "x:passed"
+  run "gate_empty_new_pact_fails" 1 gate provider-b "$T/empty.json" "$G/base.json" "$T/r.json"
+  has "gate_empty_new_pact_fails: error" "::error::"
+}
+gate_null_description_still_gated() {
+  reset
+  jq '.interactions = [{request: {method: "GET", path: "/a"}, response: {status: 200}}, {description: "a call nobody verified", request: {method: "GET", path: "/b"}, response: {status: 200}}]' "$G/base.json" > "$T/nodesc.json"
+  d1=$(bash "$DIGEST" "$T/nodesc.json" | head -1 | cut -d' ' -f1)
+  results "$T/r.json" "$d1:passed"
+  run "gate_null_description_still_gated" 1 gate provider-b "$T/nodesc.json" "$G/base.json" "$T/r.json"
+  has "gate_null_description_still_gated: names the unverified one" "a call nobody verified"
+}
+digest_null_description_and_bad_input() {
+  reset
+  jq '.interactions = [{request: {method: "GET", path: "/a"}, response: {status: 200}}]' "$G/base.json" > "$T/nodesc.json"
+  run "digest_null_description" 0 bash "$DIGEST" "$T/nodesc.json"
+  if grep -qE '^[0-9a-f]{64}  $' <<<"$out"; then pass "digest_null_description: empty description"; else fail "digest_null_description: line" "'$out'"; fi
+  printf '{not json' > "$T/bad.json"; : > "$T/empty.json"; echo '{"interactions": 3}' > "$T/notarray.json"
+  run "digest_rejects_malformed" 1 bash "$DIGEST" "$T/bad.json"
+  run "digest_rejects_empty" 1 bash "$DIGEST" "$T/empty.json"
+  run "digest_rejects_non_array" 1 bash "$DIGEST" "$T/notarray.json"
+}
+pull_command_not_found_fails() {
+  reset; export FAKE_ORAS_CMDNOTFOUND="pacts-consumer-a"
+  run "pull_command_not_found_fails" 1 bash "$PULL" "$T/out" pacts-consumer-a
+  hasnt "pull_command_not_found_fails: not skipped" "not readable"
+  has "pull_command_not_found_fails: error" "::error::"
+}
 
 default_branch_uses_event
 default_branch_falls_back_to_api
@@ -437,4 +471,9 @@ results_skips_unknown_source_dirs
 pull_then_results_compose
 pull_pr_tags_manifest_not_found_is_notice
 push_rejects_non_pr_tags
+gate_malformed_new_pact_fails
+gate_empty_new_pact_fails
+gate_null_description_still_gated
+digest_null_description_and_bad_input
+pull_command_not_found_fails
 exit $status

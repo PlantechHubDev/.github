@@ -31,7 +31,7 @@ rc=0
 pull_tag() {
   if err=$(oras pull ${auth[@]+"${auth[@]}"} "ghcr.io/plantechhubdev/$1:$2" -o "$3" 2>&1 </dev/null); then
     echo "Pulled $1:$2 into $3"
-  elif grep -qiE 'denied|not found|manifest unknown' <<<"$err"; then
+  elif grep -qiE 'denied:|: not found|manifest unknown' <<<"$err"; then
     echo "::notice::$1:$2 not readable (not published yet, or no Actions access grant); skipped"
   else
     echo "::error::Pulling $1:$2 failed: $err"
@@ -42,7 +42,7 @@ for package in "$@"; do
   if [ -z "$days" ]; then pull_tag "$package" default "$out/$package"; continue; fi
   pull_tag "$package" default "$out/default/$package"
   if ! tags=$(oras repo tags ${auth[@]+"${auth[@]}"} "ghcr.io/plantechhubdev/$package" 2>&1); then
-    if grep -qiE 'denied|not found|manifest unknown|name unknown' <<<"$tags"; then
+    if grep -qiE 'denied:|: not found|manifest unknown|name unknown' <<<"$tags"; then
       echo "::notice::$package pr tags not listable (not published yet, or no Actions access grant); skipped"
     else
       echo "::error::Listing $package tags failed: $tags"; rc=1
@@ -51,7 +51,7 @@ for package in "$@"; do
   fi
   while read -r tag; do
     if ! manifest=$(oras manifest fetch ${auth[@]+"${auth[@]}"} "ghcr.io/plantechhubdev/$package:$tag" 2>&1 </dev/null); then
-      if grep -qiE 'denied|not found|manifest unknown' <<<"$manifest"; then
+      if grep -qiE 'denied:|: not found|manifest unknown' <<<"$manifest"; then
         echo "::notice::$package:$tag manifest not readable; skipped"
       else
         echo "::error::Fetching $package:$tag manifest failed: $manifest"; rc=1

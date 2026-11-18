@@ -33,7 +33,9 @@ case "$cmd" in
     done
     pkg=${ref#*/*/}; pkg=${pkg%%:*}
     in_list() { case " $1 " in *" $pkg "*) return 0 ;; *) return 1 ;; esac; }
-    if in_list "${FAKE_ORAS_NOT_FOUND:-}"; then
+    if in_list "${FAKE_ORAS_CMDNOTFOUND:-}"; then
+      echo "oras: command not found" >&2; exit 127
+    elif in_list "${FAKE_ORAS_NOT_FOUND:-}"; then
       echo "Error: $ref: not found" >&2; exit 1
     elif in_list "${FAKE_ORAS_UNKNOWN:-}"; then
       echo "Error: $ref: manifest unknown" >&2; exit 1

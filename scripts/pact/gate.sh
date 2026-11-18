@@ -17,8 +17,13 @@ if [ -z "$results" ] || [ ! -f "$results" ]; then
   exit 0
 fi
 base_digests=""
-if [ -n "$base" ] && [ -f "$base" ]; then base_digests=$(bash "$here/digest.sh" "$base" | cut -d' ' -f1); fi
+if [ -n "$base" ] && [ -f "$base" ]; then
+  base_lines=$(bash "$here/digest.sh" "$base")
+  base_digests=$(cut -d' ' -f1 <<<"$base_lines")
+fi
 passed=$(jq -r '.interactions[] | select(.status == "passed") | .digest' "$results")
+# Captured first so a digest.sh failure (malformed or empty pact) fails the gate, not silently passes.
+lines=$(bash "$here/digest.sh" "$new")
 rc=0
 while IFS= read -r line; do
   [ -n "$line" ] || continue
@@ -29,5 +34,5 @@ while IFS= read -r line; do
     echo "::error::'$desc': $provider's default branch has not verified this call yet; release the provider change first, run $provider's contract-results workflow (or wait for its daily run) and re-run this check, or move this interaction to the pending suite."
     rc=1
   fi
-done < <(bash "$here/digest.sh" "$new")
+done <<<"$lines"
 exit $rc

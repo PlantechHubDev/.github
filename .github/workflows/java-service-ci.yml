@@ -5,11 +5,12 @@
 #     permissions:
 #       contents: read
 #       checks: write      # JUnit summary
-#       packages: read     # pth-mysql-test, when mysql-test-image is set
+#       packages: read     # pth-mysql-test (mysql-test-image) and the pact packages (pact-fetch-consumers, pact-gate-providers)
 #     with:
 #       service: calc-service
 #       mysql-test-image: ghcr.io/plantechhubdev/pth-mysql-test:<tag>   # only if the tests use it
 #       pact-fetch-consumers: pacts-consumer-a pacts-consumer-b          # only to verify consumer contracts
+#       pact-gate-providers: provider-b provider-c                       # only to gate this repo's own contracts (consumer)
 #     secrets:
 #       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
 #
@@ -20,6 +21,10 @@
 #   image-scan  builds the image from the test job's jar with the repo's
 #               Dockerfile (not pushed) and runs Trivy: any CRITICAL or HIGH
 #               vulnerability fails, apart from .trivyignore entries.
+#
+# Pact inputs (optional): pact-fetch-consumers pulls consumers' contracts from GHCR before the build (provider);
+# pact-gate-providers checks this repo's contracts against each provider's published results on pull requests
+# and merge groups (consumer). Both read GHCR packages, hence `packages: read`.
 #
 # The caller keeps its own ci-ok job; no job here is named ci-ok.
 
@@ -139,7 +144,7 @@ jobs:
           # Credentials go to a temporary file, removed when this step ends, so the build (which runs
           # the PR's code) never finds the token in ~/.docker/config.json.
           export ORAS_REGISTRY_CONFIG="$RUNNER_TEMP/oras-auth.json"
-          trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
+          trap 'oras logout --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io >/dev/null 2>&1 || true; rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
           bash .pth-checks-pact/scripts/pact/install-oras.sh
           export PATH="$RUNNER_TEMP/bin:$PATH"
           printf %s "$TOKEN" | oras login --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
@@ -197,16 +202,17 @@ jobs:
           fi
           # Credentials go to a temporary file, removed when this step ends (the build already ran).
           export ORAS_REGISTRY_CONFIG="$RUNNER_TEMP/oras-gate-auth.json"
-          trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
+          trap 'oras logout --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io >/dev/null 2>&1 || true; rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
           bash "$scripts/install-oras.sh"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           printf %s "$TOKEN" | oras login --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           gate_dir="$RUNNER_TEMP/pact-gate"
           rc=0
           # Pull layout: $gate_dir/<package>/<file>. gate-providers.sh reads it and runs gate.sh per provider.
+          bash "$scripts/oci-pull.sh" "$gate_dir" "pacts-$CONSUMER" || rc=1
           for provider in $PROVIDERS; do
             [ -f "build/pacts/$CONSUMER-$provider.json" ] || continue
-            bash "$scripts/oci-pull.sh" "$gate_dir" "pact-results-$provider" "pacts-$CONSUMER" || rc=1
+            bash "$scripts/oci-pull.sh" "$gate_dir" "pact-results-$provider" || rc=1
           done
           # shellcheck disable=SC2086  # PROVIDERS is a space-separated list of validated names
           bash "$scripts/gate-providers.sh" "$gate_dir" "$CONSUMER" build/pacts $PROVIDERS || rc=1
