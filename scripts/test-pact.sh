@@ -37,6 +37,7 @@ exists() { if [ -f "$2" ]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 
 DB=$HERE/pact/default-branch.sh PUSH=$HERE/pact/oci-push.sh PULL=$HERE/pact/oci-pull.sh
 RESULTS=$HERE/pact/results.sh
+SUMMARY=$HERE/pact/show-summary.sh
 GATEPROV=$HERE/pact/gate-providers.sh DIGEST=$HERE/pact/digest.sh GATE=$HERE/pact/gate.sh BASEREF=$HERE/pact/base-ref.sh
 G=$FIX/gate
 # digest_of <pact> <description>: the digest digest.sh prints for that interaction.
@@ -423,6 +424,132 @@ pull_command_not_found_fails() {
   hasnt "pull_command_not_found_fails: not skipped" "not readable"
   has "pull_command_not_found_fails: error" "::error::"
 }
+# summary_layout <fetched-count> [verified-line...]: $T/sp/<package>/*.json pacts and $T/sum/summary.txt.
+summary_layout() {
+  reset; rm -rf "${T:?}/sp" "${T:?}/sum"; mkdir -p "$T/sp/pacts-consumer-a" "$T/sum"
+  local n=$1 i; shift
+  for ((i = 1; i <= n; i++)); do cp "$FIX/consumer-a-provider-b.json" "$T/sp/pacts-consumer-a/consumer-a-provider-b-$i.json"; done
+  [ $# -eq 0 ] || printf '%s\n' "$@" > "$T/sum/summary.txt"
+}
+show_summary_prints_command_lines() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default' 'plain log line'
+  printf '::warning::pending pact failed: consumer-a\n::error::boom\n  ::notice::indented is not a command\n' > "$T/sum/pending-warnings.txt"
+  echo '::notice::in a json file' > "$T/sum/ignored.json"
+  run "show_summary_prints_command_lines" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_prints_command_lines: notice" "::notice::verified 1 active pacts from consumer-a under default"
+  has "show_summary_prints_command_lines: warning" "::warning::pending pact failed: consumer-a"
+  has "show_summary_prints_command_lines: error" "::error::boom"
+  hasnt "show_summary_prints_command_lines: non-command line ignored" "plain log line"
+  hasnt "show_summary_prints_command_lines: indented ignored" "indented is not"
+  hasnt "show_summary_prints_command_lines: only .txt files" "in a json file"
+}
+show_summary_verified_all_passes() {
+  summary_layout 2 '::notice::verified 1 active pacts from consumer-a under default' '::notice::verified 1 active pacts from consumer-a under pr-3'
+  run "show_summary_verified_all_passes" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_missing_summary_fails() {
+  summary_layout 2
+  run "show_summary_missing_summary_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_missing_summary_fails: message" "::error::fetched 2 consumer pacts from consumer-a but the build verified 0; the provider's contract test did not run or did not load them"
+  has "show_summary_missing_summary_fails: notice" "::notice::no contract verification summary found under $T/sum"
+}
+show_summary_too_few_verified_fails() {
+  summary_layout 2 '::notice::verified 1 active pacts from consumer-a under default'
+  run "show_summary_too_few_verified_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_too_few_verified_fails: message" "::error::fetched 2 consumer pacts from consumer-a but the build verified 1;"
+}
+show_summary_missing_report_dir_fails() {
+  summary_layout 1; rm -rf "${T:?}/sum"
+  run "show_summary_missing_report_dir_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_missing_report_dir_fails: notice" "::notice::no contract verification summary found under $T/sum"
+}
+show_summary_nothing_fetched_is_notice() {
+  summary_layout 0; rm -rf "${T:?}/sum"
+  run "show_summary_nothing_fetched_is_notice" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_nothing_fetched_is_notice: notice" "::notice::no consumer pacts were fetched"
+  run "show_summary_missing_pacts_dir" 0 bash "$SUMMARY" "$T/sum" "$T/nope" provider-b
+}
+show_summary_pending_only_is_ok() {
+  summary_layout 0; rm -rf "${T:?}/sum"
+  jq '.consumer.name = "consumer-a.pending"' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-a/consumer-a.pending-provider-b.json"
+  run "show_summary_pending_only_is_ok" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_pending_only_is_ok: nothing fetched" "::notice::no consumer pacts were fetched"
+}
+show_summary_counts_only_this_provider() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  jq '.provider.name = "provider-z"' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-a/consumer-a-provider-z.json"
+  run "show_summary_counts_only_this_provider" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_checks_each_consumer() {
+  summary_layout 1 '::notice::verified 2 active pacts from consumer-a under default'
+  mkdir -p "$T/sp/pacts-consumer-c"
+  jq '.consumer.name = "consumer-c"' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-c/consumer-c-provider-b.json"
+  run "show_summary_checks_each_consumer" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_checks_each_consumer: names the consumer" "consumer-c"
+  has "show_summary_checks_each_consumer: error" "::error::fetched 1 consumer pacts from consumer-c but the build verified 0"
+  printf '%s\n' '::notice::verified 1 active pacts from consumer-a under default' '::notice::verified 1 active pacts from consumer-a under pr-3' '::notice::verified 1 active pacts from consumer-c under default' > "$T/sum/summary.txt"
+  run "show_summary_checks_each_consumer: duplicates sum per consumer" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_nested_source_layout() {
+  reset; rm -rf "${T:?}/sp" "${T:?}/sum"; mkdir -p "$T/sp/default/pacts-consumer-a" "$T/sp/pr-3/pacts-consumer-a" "$T/sum"
+  cp "$FIX/consumer-a-provider-b.json" "$T/sp/default/pacts-consumer-a/"; cp "$FIX/consumer-a-provider-b.json" "$T/sp/pr-3/pacts-consumer-a/"
+  run "show_summary_nested_source_layout" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_nested_source_layout: default unverified" "::error::fetched 1 consumer pacts from consumer-a under default but the build verified 0"
+  has "show_summary_nested_source_layout: pr-3 unverified" "::error::fetched 1 consumer pacts from consumer-a under pr-3 but the build verified 0"
+  echo '::notice::verified 2 active pacts from consumer-a under default' > "$T/sum/summary.txt"
+  run "show_summary_nested_only_default_verified_fails_pr3" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_nested_only_default_verified_fails_pr3: names pr-3" "under pr-3"
+  hasnt "show_summary_nested_only_default_verified_fails_pr3: default fine" "under default but"
+  printf '%s\n' "::notice::verified 1 active pacts from consumer-a under $T/sp/default" '::notice::verified 1 active pacts from consumer-a under pr-3' > "$T/sum/summary.txt"
+  run "show_summary_nested_verified_ok (trailing folder component matches)" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_provider_name_mismatch_fails() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  run "show_summary_provider_name_mismatch_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b-service
+  has "show_summary_provider_name_mismatch_fails: error" "::error::fetched 1 pacts but none for provider 'provider-b-service' (found: provider-b)"
+}
+show_summary_package_without_provider_warns() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  mkdir -p "$T/sp/pacts-consumer-d"
+  jq '.provider.name = "provider-z" | .consumer.name = "consumer-d"' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-d/consumer-d-provider-z.json"
+  run "show_summary_package_without_provider_warns" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_package_without_provider_warns: warning" "::warning::package pacts-consumer-d holds pacts but none for provider 'provider-b'"
+  hasnt "show_summary_package_without_provider_warns: not the good package" "package pacts-consumer-a holds"
+}
+show_summary_large_n_compares_numerically() {
+  summary_layout 2 '::notice::verified 999999 active pacts from consumer-a under default'
+  run "show_summary_large_n_compares_numerically" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_odd_file_names() {
+  summary_layout 0; rm -rf "${T:?}/sum"; mkdir -p "$T/sum" "$T/sp/pacts-consumer-a/sub dir"
+  cp "$FIX/consumer-a-provider-b.json" "$T/sp/pacts-consumer-a/sub dir/a pact.json"
+  run "show_summary_odd_file_names" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_odd_file_names: counted" "::error::fetched 1 consumer pacts from consumer-a"
+}
+show_summary_rejects_bad_provider() {
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default'
+  run "show_summary_rejects_bad_provider" 2 bash "$SUMMARY" "$T/sum" "$T/sp" 'bad name;x'
+  has "show_summary_rejects_bad_provider: error" "::error::"
+  run "show_summary_rejects_empty_provider" 2 bash "$SUMMARY" "$T/sum" "$T/sp" ''
+}
+show_summary_skips_non_pact_json() {
+  summary_layout 0; rm -rf "${T:?}/sum"
+  echo '{"foo": 1}' > "$T/sp/pacts-consumer-a/other.json"; echo '[1,2]' > "$T/sp/pacts-consumer-a/list.json"; echo '{broken' > "$T/sp/pacts-consumer-a/broken.json"
+  run "show_summary_skips_non_pact_json" 0 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_skips_non_pact_json: notice" "::notice::skipping non-pact JSON"
+}
+show_summary_bad_consumer_name_fails_closed() {
+  summary_layout 0; rm -rf "${T:?}/sum"; mkdir -p "$T/sum"
+  jq '.consumer.name = null' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-a/x.json"
+  run "show_summary_bad_consumer_name_fails_closed" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  echo '::notice::verified 5 active pacts from  under default' > "$T/sum/summary.txt"
+  run "show_summary_bad_consumer_name_fails_closed: no line can cover it" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+}
+show_summary_caps_verified_digits() {
+  summary_layout 1 '::notice::verified 99999999999 active pacts from consumer-a under default'
+  run "show_summary_caps_verified_digits" 1 bash "$SUMMARY" "$T/sum" "$T/sp" provider-b
+  has "show_summary_caps_verified_digits: error text" "the build may also have failed earlier"
+}
 
 default_branch_uses_event
 default_branch_falls_back_to_api
@@ -476,4 +603,22 @@ gate_empty_new_pact_fails
 gate_null_description_still_gated
 digest_null_description_and_bad_input
 pull_command_not_found_fails
+show_summary_prints_command_lines
+show_summary_verified_all_passes
+show_summary_missing_summary_fails
+show_summary_too_few_verified_fails
+show_summary_missing_report_dir_fails
+show_summary_nothing_fetched_is_notice
+show_summary_pending_only_is_ok
+show_summary_counts_only_this_provider
+show_summary_checks_each_consumer
+show_summary_nested_source_layout
+show_summary_skips_non_pact_json
+show_summary_bad_consumer_name_fails_closed
+show_summary_caps_verified_digits
+show_summary_provider_name_mismatch_fails
+show_summary_package_without_provider_warns
+show_summary_large_n_compares_numerically
+show_summary_odd_file_names
+show_summary_rejects_bad_provider
 exit $status
