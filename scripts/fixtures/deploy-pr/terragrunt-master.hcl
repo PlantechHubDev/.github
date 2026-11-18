@@ -4,7 +4,7 @@ include "root" {
 }
 
 terraform {
-  source = "git::https://github.com/PlantechHubDev/infrastructure-modules.git//ecs-service?ref=v1.2.3"
+  source = "git::https://example.test/modules.git//service?ref=v1.2.3"
 }
 
 inputs = {

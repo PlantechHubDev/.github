@@ -100,6 +100,7 @@ golden "master form, not retagged: golden PR body (says :master was not moved, n
 if diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl" >/dev/null; then pass "master form: unit pinned to the digest, other lines unchanged"; else fail "master form: unit pinned" "$(diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl")"; fi
 if diff <(remote_file master) "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: origin master untouched"; else fail "master form: origin master untouched" "master changed"; fi
 if diff <(git -C "$O" show "$BR:live/region-a/prod/other-service/terragrunt.hcl") "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: other unit untouched"; else fail "master form: other unit untouched" "other-service changed"; fi
+has "master form: module source line kept (placeholder host)" "$(remote_file "$BR")" 'source = "git::https://example.test/modules.git//service?ref=v1.2.3"'
 is  "master form: one commit on the branch" "$(git -C "$O" rev-list --count "master..$BR")" 1
 is  "master form: commit subject" "$(git -C "$O" log -1 --format=%s "$BR")" "deploy($SVC): pin $S7"
 is  "master form: commit body is empty (no attribution)" "$(git -C "$O" log -1 --format=%b "$BR")" ""
