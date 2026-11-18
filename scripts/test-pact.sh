@@ -36,7 +36,7 @@ empty()  { if [ -s "$2" ]; then fail "$1" "$(basename "$2") not empty: $(cat "$2
 exists() { if [ -f "$2" ]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 
 DB=$HERE/pact/default-branch.sh PUSH=$HERE/pact/oci-push.sh PULL=$HERE/pact/oci-pull.sh
-DIGEST=$HERE/pact/digest.sh GATE=$HERE/pact/gate.sh BASEREF=$HERE/pact/base-ref.sh
+GATEPROV=$HERE/pact/gate-providers.sh DIGEST=$HERE/pact/digest.sh GATE=$HERE/pact/gate.sh BASEREF=$HERE/pact/base-ref.sh
 G=$FIX/gate
 # digest_of <pact> <description>: the digest digest.sh prints for that interaction.
 digest_of() { bash "$DIGEST" "$1" | grep -F -- "  $2" | head -1 | cut -d' ' -f1; }
@@ -46,7 +46,9 @@ results() {
   local f=$1; shift
   printf '%s\n' "$@" | jq -R -s '{provider:"provider-b",sha:"abc1234",interactions:(split("\n")|map(select(length>0)|split(":")|{consumer:"consumer-a",source:"default",description:"x",digest:.[0],status:.[1]}))}' > "$f"
 }
-# shellcheck disable=SC2329  # called through run()
+# shellcheck disable=SC2329  # gate and gate_providers are called through run()
+gate_providers() { BASE_REF=develop DEFAULT_BRANCH=develop bash "$GATEPROV" "$T/gd" consumer-a "$T/build/pacts" "$@"; }
+# shellcheck disable=SC2329
 gate() { BASE_REF=develop DEFAULT_BRANCH=develop bash "$GATE" "$@"; }
 
 default_branch_uses_event() {
@@ -140,6 +142,54 @@ pull_other_error_fails() {
   has "pull_other_error_fails: error shown" "connection refused"
 }
 
+# Mirrors the layout oras pull produces: <dir>/<package>/<file>.
+gp_layout() {
+  reset; rm -rf "$T/gd" "$T/build"
+  mkdir -p "$T/gd/pact-results-provider-b" "$T/gd/pacts-consumer-a" "$T/build/pacts"
+  cp "$G/base.json" "$T/gd/pacts-consumer-a/consumer-a-provider-b.json"
+  cp "$G/new.json" "$T/build/pacts/consumer-a-provider-b.json"
+}
+gate_providers_reads_results_file() {
+  gp_layout
+  d1=$(digest_of "$G/new.json" "a request to delete a thing"); d2=$(digest_of "$G/new.json" "a request to create a thing")
+  results "$T/gd/pact-results-provider-b/pact-results.json" "$d1:passed" "$d2:passed"
+  run "gate_providers_reads_results_file" 0 gate_providers provider-b
+  hasnt "gate_providers_reads_results_file: onboarded" "not onboarded"
+}
+gate_providers_fails_on_results() {
+  gp_layout
+  d1=$(digest_of "$G/new.json" "a request to delete a thing")
+  results "$T/gd/pact-results-provider-b/pact-results.json" "$d1:passed"
+  run "gate_providers_fails_on_results" 1 gate_providers provider-b
+  has "gate_providers_fails_on_results: names it" "a request to create a thing"
+}
+gate_providers_no_results_is_notice() {
+  gp_layout
+  run "gate_providers_no_results_is_notice" 0 gate_providers provider-b
+  has "gate_providers_no_results_is_notice: notice" "not onboarded"
+}
+gate_providers_no_base_pact_all_new() {
+  gp_layout; rm "$T/gd/pacts-consumer-a/consumer-a-provider-b.json"
+  results "$T/gd/pact-results-provider-b/pact-results.json" "x:passed"
+  run "gate_providers_no_base_pact_all_new" 1 gate_providers provider-b
+}
+gate_providers_skips_missing_pact() {
+  gp_layout; rm "$T/build/pacts/consumer-a-provider-b.json"
+  run "gate_providers_skips_missing_pact" 0 gate_providers provider-b
+  has "gate_providers_skips_missing_pact: notice" "::notice::"
+}
+gate_providers_one_failure_fails_all() {
+  gp_layout; mkdir -p "$T/gd/pact-results-provider-c"
+  cp "$G/new.json" "$T/build/pacts/consumer-a-provider-c.json"
+  results "$T/gd/pact-results-provider-c/pact-results.json" "x:passed"
+  run "gate_providers_one_failure_fails_all" 1 gate_providers provider-b provider-c
+}
+gate_providers_rejects_bad_name() {
+  gp_layout
+  run "gate_providers_rejects_bad_name" 2 gate_providers 'provider-b;x'
+  has "gate_providers_rejects_bad_name: error" "::error::"
+}
+
 digest_ignores_description_and_metadata() {
   reset
   a=$(digest_of "$G/base.json" "a request for a thing"); b=$(digest_of "$G/meta-variant.json" "the same call")
@@ -171,6 +221,7 @@ gate_new_unverified_fails() {
   has "gate_new_unverified_fails: names it" "a request to create a thing"
   has "gate_new_unverified_fails: design text" "has not verified this call yet"
   has "gate_new_unverified_fails: provider named" "provider-b's default branch"
+  has "gate_new_unverified_fails: full text" "provider-b's default branch has not verified this call yet; release the provider change first, run provider-b's contract-results workflow (or wait for its daily run) and re-run this check, or move this interaction to the pending suite."
 }
 gate_changed_failed_fails() {
   reset
@@ -199,9 +250,9 @@ gate_skips_non_default_base() {
 }
 gate_merge_group_base_ref() {
   reset
-  run "gate_merge_group_base_ref" 0 env GITHUB_BASE_REF= MERGE_GROUP_BASE_REF=refs/heads/develop bash "$BASEREF"
+  run "gate_merge_group_base_ref" 0 env PR_BASE_REF= MERGE_GROUP_BASE_REF=refs/heads/develop bash "$BASEREF"
   if [ "$out" = develop ]; then pass "gate_merge_group_base_ref: develop"; else fail "gate_merge_group_base_ref" "got '$out'"; fi
-  run "gate_pr_base_ref" 0 env GITHUB_BASE_REF=develop MERGE_GROUP_BASE_REF= bash "$BASEREF"
+  run "gate_pr_base_ref" 0 env PR_BASE_REF=develop MERGE_GROUP_BASE_REF= bash "$BASEREF"
   if [ "$out" = develop ]; then pass "gate_pr_base_ref: develop"; else fail "gate_pr_base_ref" "got '$out'"; fi
 }
 
@@ -229,4 +280,11 @@ gate_no_results_is_notice
 gate_no_base_pact_all_new
 gate_skips_non_default_base
 gate_merge_group_base_ref
+gate_providers_reads_results_file
+gate_providers_fails_on_results
+gate_providers_no_results_is_notice
+gate_providers_no_base_pact_all_new
+gate_providers_skips_missing_pact
+gate_providers_one_failure_fails_all
+gate_providers_rejects_bad_name
 exit $status

@@ -155,7 +155,7 @@ jobs:
         run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
 
       - name: Upload consumer contracts
-        if: always()
+        if: always() && inputs.pact-gate-providers != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pacts
@@ -178,8 +178,7 @@ jobs:
           PROVIDERS: ${{ inputs.pact-gate-providers }}
           CONSUMER: ${{ github.event.repository.name }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_BASE_REF: ${{ github.base_ref }}
+          PR_BASE_REF: ${{ github.base_ref }}
           MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
           EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,22 +201,16 @@ jobs:
           trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
           bash "$scripts/install-oras.sh"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          printf %s "$TOKEN" | oras login --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          printf %s "$TOKEN" | oras login --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           gate_dir="$RUNNER_TEMP/pact-gate"
           rc=0
+          # Pull layout: $gate_dir/<package>/<file>. gate-providers.sh reads it and runs gate.sh per provider.
           for provider in $PROVIDERS; do
-            new="build/pacts/$CONSUMER-$provider.json"
-            if [ ! -f "$new" ]; then
-              echo "::notice::No $new written by the build; contract gate for $provider skipped"
-              continue
-            fi
-            bash "$scripts/oci-pull.sh" "$gate_dir" "pact-results-$provider" "pacts-$CONSUMER"
-            base="$gate_dir/pacts-$CONSUMER/$CONSUMER-$provider.json"
-            results="$gate_dir/pact-results-$provider/results.json"
-            [ -f "$base" ] || base=""
-            [ -f "$results" ] || results=""
-            bash "$scripts/gate.sh" "$provider" "$new" "$base" "$results" || rc=1
+            [ -f "build/pacts/$CONSUMER-$provider.json" ] || continue
+            bash "$scripts/oci-pull.sh" "$gate_dir" "pact-results-$provider" "pacts-$CONSUMER" || rc=1
           done
+          # shellcheck disable=SC2086  # PROVIDERS is a space-separated list of validated names
+          bash "$scripts/gate-providers.sh" "$gate_dir" "$CONSUMER" build/pacts $PROVIDERS || rc=1
           exit $rc
 
       - name: Check out the shared scripts at checks-ref
