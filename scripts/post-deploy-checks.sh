@@ -24,7 +24,9 @@
 #               runningCount equals its desiredCount
 #   logs        no log event matching ERROR at or after <since-iso> in the log streams of the
 #               PRIMARY deployment's tasks (startedBy = the deployment id), running or stopped
-#               (crash-replaced during the rollout), named by the awslogs convention
+#               (crash-replaced during the rollout; a stopped task that never started, with no
+#               startedAt or no container runtimeId, has no stream and is skipped), named by the
+#               awslogs convention
 #               <awslogs-stream-prefix>/<container name>/<task id>, 100 streams per call
 #   alarms      at least one CloudWatch alarm's name starts with <alarm-prefix> (else exit 2), and
 #               none of them is in state ALARM
@@ -143,8 +145,8 @@ else ok "deployment COMPLETED ($running of $desired tasks)"; fi
 pid=$(jq -r '.id // empty' <<<"$primary")
 streams=()
 while IFS= read -r s; do [ -z "$s" ] || streams+=("$s"); done < <(
-  jq -r -s --arg p "$pid" '[.[].tasks[] | select(.startedBy == $p) | .taskArn | split("/") | last] | unique | .[]' \
-    <<<"$tasks$stopped" |
+  jq -r -s --arg p "$pid" '[.[0].tasks[], (.[1].tasks[] | select(.startedAt != null and any(.containers[]?; .runtimeId != null)))
+      | select(.startedBy == $p) | .taskArn | split("/") | last] | unique | .[]' <<<"$tasks$stopped" |
   while IFS= read -r t; do awk -v t="$t" '{ print $2 "/" $1 "/" t }' <<<"$mine"; done)
 if [ "${#streams[@]}" -eq 0 ]; then
   bad logs "no task of the primary deployment ${pid:-?} is running, so there is no log stream to check"

@@ -6,6 +6,7 @@
 # queue, or a change record (or break-glass) for a manual retag.
 #
 # GitHub: gh, authenticated through GH_TOKEN (the caller's GITHUB_TOKEN, contents: read). No AWS.
+# Usually exit 1 is benign: a newer merge landed first, and its release deploys this change too.
 # Exit: 0 <sha> is the tip; 1 master has moved on (nothing may be retagged or deployed); 2 the
 # tip could not be read; 64 usage.
 set -uo pipefail
@@ -19,7 +20,7 @@ tip=$(gh api "repos/$repo/commits/master" --jq .sha) \
   || { echo "::error::release-is-tip: cannot read the tip of master in $repo; nothing is retagged or deployed" >&2; exit 2; }
 [[ $tip =~ ^[0-9a-f]{40}$ ]] || { echo "::error::release-is-tip: the tip of master in $repo reads as '$tip'; nothing is retagged or deployed" >&2; exit 2; }
 if [ "$tip" != "$sha" ]; then
-  echo "::error::release-is-tip: ${sha:0:7} is not the tip of master in $repo (the tip is ${tip:0:7}): re-running an older release would roll prod back without approval. Nothing is retagged or deployed. A rollback needs a revert PR through the merge queue, or a change record (break-glass when prod is down) for a manual retag." >&2
+  echo "::error::release-is-tip: ${sha:0:7} is not released: master has moved on to ${tip:0:7}: a newer merge superseded this release, and its release deploys this change too. Nothing is retagged or deployed. If you meant to roll back, use a revert PR or a change record." >&2
   exit 1
 fi
 echo "release-is-tip: ${sha:0:7} is the tip of master" >&2

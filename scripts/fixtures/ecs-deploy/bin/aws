@@ -4,8 +4,9 @@
 #   ecs list-tasks / describe-tasks  the running tasks: $FAKE_TASKS, or $FAKE_PREV_TASKS (default
 #       $FAKE_TASKS) until update-service has run (marker file $FAKE_STATE/updated); with
 #       --desired-status STOPPED, $FAKE_STOPPED_TASKS. One task per line, "<task-id> <app digest>
-#       [<sidecar digest>|-] [<startedBy>]" (startedBy default ecs-svc/primary, the PRIMARY
-#       deployment's id): container "app" runs registry.example.test/example-service:master,
+#       [<sidecar digest>|-] [<startedBy>|-] [nostart]" (startedBy default ecs-svc/primary, the
+#       PRIMARY deployment's id; "nostart": a task whose containers never started, so no startedAt
+#       and no container runtimeId): container "app" runs registry.example.test/example-service:master,
 #       container "log-router" log-router:stable. describe-tasks returns only the --tasks asked for.
 #   ecs update-service               writes the marker; fails when FAKE_UPDATE_ERR names an exception
 #   ecs wait services-stable         exit 255 (waiter failed) when FAKE_WAIT_FAIL=1
@@ -66,13 +67,15 @@ case "$1 $op" in
   "ecs describe-tasks")
     want=" $(list_after --tasks "$@" | sed 's#.*/##' | tr '\n' ' ')"
     { tasks | awk 'NF { print "RUNNING", $0 }'; printf '%s\n' "${FAKE_STOPPED_TASKS-}" | awk 'NF { print "STOPPED", $0 }'; } \
-      | while read -r st id d s by; do
+      | while read -r st id d s by ns; do
       [[ $want == *" $id "* ]] || continue
       [ "${s:--}" != - ] || s=""
-      jq -n --arg id "$id" --arg d "$d" --arg s "$s" --arg by "${by:-ecs-svc/primary}" --arg st "$st" '{taskArn: ("task/example-cluster/" + $id),
+      [ "${by:--}" != - ] || by=""
+      jq -n --arg id "$id" --arg d "$d" --arg s "$s" --arg by "${by:-ecs-svc/primary}" --arg st "$st" --arg ns "${ns:-}" '{taskArn: ("task/example-cluster/" + $id),
         lastStatus: $st, startedBy: $by, taskDefinitionArn: "td/example-service:7",
         containers: ([{name: "app", image: "registry.example.test/example-service:master", imageDigest: $d}]
-          + (if $s == "" then [] else [{name: "log-router", image: "registry.example.test/log-router:stable", imageDigest: $s}] end))}'
+          + (if $s == "" then [] else [{name: "log-router", image: "registry.example.test/log-router:stable", imageDigest: $s}] end))}
+        | if $ns == "nostart" then . else .startedAt = "2026-11-18T12:00:01Z" | .containers[] += {runtimeId: ("rt-" + $id)} end'
     done | jq -s '{tasks: ., failures: []}' ;;
   "ecs update-service")
     if [ -n "${FAKE_UPDATE_ERR:-}" ]; then

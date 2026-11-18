@@ -4,6 +4,10 @@
 #   api repos/<repo>/actions/runs/<id>/jobs...  prints $FAKE_JOBS (JSON), then, with --paginate,
 #                                               $FAKE_JOBS_PAGE2 as a second page when set; exits 1
 #                                               when FAKE_JOBS_EXIT=1
+#   api repos/<repo>/actions/runs/<id> ...      prints $FAKE_WORKFLOW_ID (the --jq .workflow_id result),
+#                                               or exits 1 when FAKE_WORKFLOW_ID_EXIT=1
+#   api repos/<repo>/actions/workflows/<id>/runs?...  prints $FAKE_RELEASE_RUNS (JSON; default no
+#                                               runs), or exits 1 when FAKE_RELEASE_RUNS_EXIT=1
 #   api repos/<repo>/actions/runs?...           prints $FAKE_RUNS (JSON), or exits 1 when FAKE_RUNS_EXIT=1
 #   api repos/<repo>/commits/<sha>/pulls        prints $FAKE_PULLS (JSON array; default [])
 #   api repos/<repo>/commits/master ...         prints $FAKE_TIP (the --jq .sha result), or exits
@@ -27,6 +31,12 @@ case "$1 $2" in
     [ "${FAKE_JOBS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
     if [ -n "${FAKE_JOBS:-}" ]; then echo "$FAKE_JOBS"; else echo '{"jobs":[]}'; fi
     [ -z "${FAKE_JOBS_PAGE2:-}" ] || [ -z "$paginate" ] || echo "$FAKE_JOBS_PAGE2" ;;
+  "api repos/"*/actions/runs/[0-9]*)
+    [ "${FAKE_WORKFLOW_ID_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    echo "${FAKE_WORKFLOW_ID:-4242}" ;;
+  "api repos/"*/actions/workflows/*/runs*)
+    [ "${FAKE_RELEASE_RUNS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    if [ -n "${FAKE_RELEASE_RUNS:-}" ]; then echo "$FAKE_RELEASE_RUNS"; else echo '{"workflow_runs":[]}'; fi ;;
   "api repos/"*/actions/runs*)
     [ "${FAKE_RUNS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
     if [ -n "${FAKE_RUNS:-}" ]; then echo "$FAKE_RUNS"; else echo '{"workflow_runs":[]}'; fi ;;

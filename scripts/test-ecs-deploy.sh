@@ -17,7 +17,7 @@ export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log FAKE_STATE=$T/state
 mkdir -p "$FAKE_STATE"
 unset FAKE_RUNS FAKE_RUNS_EXIT FAKE_JOBS FAKE_JOBS_EXIT FAKE_TASKS FAKE_PREV_TASKS FAKE_UPDATE_ERR \
   FAKE_WAIT_FAIL FAKE_ROLLOUT FAKE_RUNNING FAKE_DESIRED FAKE_LOG_EVENTS FAKE_ALARMS FAKE_FAIL_OP \
-  FAKE_AWS_DENIED FAKE_COMMENT_EXIT FAKE_TIP FAKE_TIP_EXIT FAKE_PULLS FAKE_JOBS_PAGE2 FAKE_STOPPED_TASKS FAKE_TD FAKE_CHILDREN FAKE_INDEX_MISSING FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_TAG_DIGEST GITHUB_OUTPUT GITHUB_STEP_SUMMARY
+  FAKE_AWS_DENIED FAKE_COMMENT_EXIT FAKE_TIP FAKE_TIP_EXIT FAKE_WORKFLOW_ID FAKE_WORKFLOW_ID_EXIT FAKE_RELEASE_RUNS FAKE_RELEASE_RUNS_EXIT GITHUB_RUN_ID FAKE_PULLS FAKE_JOBS_PAGE2 FAKE_STOPPED_TASKS FAKE_TD FAKE_CHILDREN FAKE_INDEX_MISSING FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_TAG_DIGEST GITHUB_OUTPUT GITHUB_STEP_SUMMARY
 SVC=example-service
 REPO=PlantechHubDev/$SVC
 A=sha256:$(printf 'a%.0s' $(seq 64))   # the released image
@@ -164,6 +164,8 @@ run "tip: release commit is the tip of master exits 0" 0 release-is-tip.sh "$REP
 logs "tip: reads master's tip" "$GH_LOG" "api repos/$REPO/commits/master --jq .sha"
 empty "tip: no aws call" "$AWS_LOG"
 FAKE_TIP=$OTHER run "tip: master moved on exits 1" 1 release-is-tip.sh "$REPO" "$MERGE"
+has "tip: says master moved on to the tip" "$err" "master has moved on to ${OTHER:0:7}"
+has "tip: says the newer release deploys this change too" "$err" "a newer merge superseded this release, and its release deploys this change too"
 has "tip: says a rollback needs a revert PR" "$err" "revert PR"
 has "tip: says a rollback needs a change record" "$err" "change record"
 empty "tip: master moved on: nothing retagged (no aws call)" "$AWS_LOG"
@@ -268,6 +270,10 @@ logs "checks: lists the stopped tasks too" "$AWS_LOG" "ecs list-tasks --cluster 
 FAKE_STOPPED_TASKS="t8 $B $L ecs-svc/old" FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) ecs/app/t8 ERROR drained" \
   pdc "checks: ERROR in a STOPPED task of an older deployment exits 0" 0 "${ARGS[@]}"
 FAKE_STOPPED_TASKS="t9 $B $L" pdc "checks: a STOPPED task's digest does not count" 0 "${ARGS[@]}"
+# A STOPPED task whose containers never started has no log stream: none is named for it.
+FAKE_STOPPED_TASKS="t7 $A $L - nostart" pdc "checks: a STOPPED task that never started exits 0" 0 "${ARGS[@]}"
+nologs "checks: no stream named for the task that never started" "$AWS_LOG" "ecs/app/t7"
+logs "checks: the running tasks' streams are still read" "$AWS_LOG" "--log-stream-names $NEW3 $NEW4 --"
 # More than 100 tasks: describe-tasks and the log streams go in chunks of 100.
 MANY=$(for i in $(seq 1 101); do echo "m$i $A $L"; done)
 FAKE_TASKS=$MANY FAKE_RUNNING=101 FAKE_DESIRED=101 pdc "checks: 101 tasks exit 0" 0 "${ARGS[@]}"
@@ -317,15 +323,27 @@ G -C "$S" merge -q --no-ff -m "Merge pull request #11 from PlantechHubDev/feat-1
 G -C "$S" commit -q --allow-empty -m "fix: direct commit"
 G -C "$S" commit -q --allow-empty -m "Merge pull request #12 from PlantechHubDev/feat-12"
 HEAD12=$(git -C "$S" rev-parse HEAD)
-RUN=https://github.com/$REPO/actions/runs/77
-export SERVICE=$SVC SERVICE_REPO=$S GITHUB_REPOSITORY=$REPO GITHUB_STEP_SUMMARY=$T/summary.md FAKE_COMMIT=$DEPLOYED
+G -C "$S" checkout -q -b elsewhere "$DEPLOYED"
+G -C "$S" commit -q --allow-empty -m "Merge pull request #50 from PlantechHubDev/never-merged"
+ELSEWHERE=$(git -C "$S" rev-parse HEAD)
+G -C "$S" checkout -q master
+RUN=https://github.com/$REPO/actions/runs/777
+# The range start is the head_sha of the newest successful run of this release workflow on
+# master, other than this run ($GITHUB_RUN_ID); blocked or failed runs are never "success".
+export SERVICE=$SVC SERVICE_REPO=$S GITHUB_REPOSITORY=$REPO GITHUB_STEP_SUMMARY=$T/summary.md GITHUB_RUN_ID=777 \
+  FAKE_WORKFLOW_ID=4242 FAKE_RELEASE_RUNS
+# rrun <id> <head sha>: one successful release run.
+rrun() { printf '{"id":%s,"head_sha":"%s","status":"completed","conclusion":"success"}' "$1" "$2"; }
+FAKE_RELEASE_RUNS=$(runs "$(rrun 500 "$DEPLOYED")")
 : > "$GITHUB_STEP_SUMMARY"
 # dc: deploy-comment.sh with no comments recorded yet; dc_again keeps the earlier ones (a re-run).
 dc() { rm -f "$FAKE_STATE"/comments-*; run "$1" "$2" deploy-comment.sh "${@:3}"; }
 dc_again() { run "$1" "$2" deploy-comment.sh "${@:3}"; }
 MARK="<!-- pth-deploy:${HEAD12:0:7}:$A -->"
 dc "comment: exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
-logs "comment: resolves the previous digest's commit" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageDigest=$B"
+logs "comment: finds this run's workflow" "$GH_LOG" "api repos/$REPO/actions/runs/777 --jq .workflow_id"
+logs "comment: lists its successful push runs on master" "$GH_LOG" "api repos/$REPO/actions/workflows/4242/runs?branch=master&event=push&status=success"
+empty "comment: no AWS lookup for the range" "$AWS_LOG"
 count "comment: on #11 once" "$GH_LOG" "pr comment 11 " 1
 count "comment: on #12 once" "$GH_LOG" "pr comment 12 " 1
 nologs "comment: none on #10 (already deployed)" "$GH_LOG" "pr comment 10 "
@@ -333,7 +351,7 @@ nologs "comment: none on #99 (not on the first-parent history)" "$GH_LOG" "pr co
 count "comment: two comments in all" "$GH_LOG" "pr comment" 2
 logs "comment: on the service repo" "$GH_LOG" "--repo $REPO"
 logs "comment: body has the digest" "$GH_LOG" "$A"
-logs "comment: body has the previous digest" "$GH_LOG" "$B"
+logs "comment: body says which image it replaces" "$GH_LOG" "replaces \`$B\`"
 logs "comment: body has the run link" "$GH_LOG" "$RUN"
 logs "comment: body says stable" "$GH_LOG" "stable"
 logs "comment: body has the hidden marker" "$GH_LOG" "$MARK"
@@ -341,28 +359,52 @@ logs "comment: reads the PR's comments for the marker" "$GH_LOG" "api --paginate
 logs "comment: step summary repeats it" "$GITHUB_STEP_SUMMARY" "$A"
 logs "comment: step summary lists the PRs" "$GITHUB_STEP_SUMMARY" "#12"
 # Idempotent: a re-run finds the marker on both PRs and comments on neither.
-dc_again "comment: re-run exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
+dc_again "comment: re-run exits 0" 0 "$HEAD12" "$A" "" "$RUN"
 nologs "comment: re-run adds no comment" "$GH_LOG" "pr comment"
 has "comment: re-run says the PRs already carry the comment" "$out$err" "already"
 # Another deploy of another image on the same PRs is a new comment.
 dc_again "comment: another digest on the same PRs exits 0" 0 "$HEAD12" "$B" "$L" "$RUN"
 count "comment: another digest: a new comment on #12" "$GH_LOG" "pr comment 12 " 1
-# Re-run with the previous digest unknown (:master already named the image): the merge's own PR.
-dc "comment: previous unknown exits 0" 0 "$HEAD12" "$A" "" "$RUN"
-count "comment: previous unknown: the merge's own PR" "$GH_LOG" "pr comment 12 " 1
-count "comment: previous unknown: nothing else" "$GH_LOG" "pr comment" 1
-nologs "comment: previous unknown: no ECR lookup" "$AWS_LOG" "describe-images"
-# Previous digest has no sha-<7> tag that resolves: the merge's own PR, with a warning.
-FAKE_COMMIT=nope dc "comment: unknown previous commit still exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
-count "comment: unknown previous commit: only the merge's own PR" "$GH_LOG" "pr comment 12 " 1
-count "comment: unknown previous commit: nothing else" "$GH_LOG" "pr comment" 1
-has "comment: unknown previous commit: warns" "$out$err" "::warning::"
-# The merge's own PR is always included, even when the range would miss it.
-FAKE_COMMIT=$HEAD12 dc "comment: previous resolves to the merge itself exits 0" 0 "$HEAD12" "$A" "$B" "$RUN"
-count "comment: previous = merge: the merge's own PR" "$GH_LOG" "pr comment 12 " 1
+
+# Release A (#11's merge) was blocked by the tip check because B (#12) landed first; B's release
+# failed after its retag and is re-run: :master already names the image (previous unknown), and
+# the run list holds this run (777, excluded) and the last real success. Both A's and B's PRs.
+HEAD11=$(git -C "$S" rev-parse HEAD~2)
+FAKE_RELEASE_RUNS=$(runs "$(rrun 777 "$HEAD12")" "$(rrun 500 "$DEPLOYED")")
+dc "comment: A blocked, B re-run: exits 0" 0 "$HEAD12" "$A" "" "$RUN"
+count "comment: A blocked, B re-run: A's PR #11" "$GH_LOG" "pr comment 11 " 1
+count "comment: A blocked, B re-run: B's PR #12" "$GH_LOG" "pr comment 12 " 1
+nologs "comment: A blocked, B re-run: not #10" "$GH_LOG" "pr comment 10 "
+logs "comment: re-run body says previous unknown" "$GH_LOG" "unknown (re-run)"
+is "comment: the scenario's A is #11's merge" "$(git -C "$S" log -1 --format=%s "$HEAD11")" "Merge pull request #11 from PlantechHubDev/feat-11"
+FAKE_RELEASE_RUNS=$(runs "$(rrun 500 "$DEPLOYED")")
+
+# The first trunk deploy: no earlier successful run, so the merge's own PR only, with a notice.
+FAKE_RELEASE_RUNS=$(runs) dc "comment: no prior success exits 0" 0 "$HEAD12" "$A" "" "$RUN"
+count "comment: no prior success: the merge's own PR" "$GH_LOG" "pr comment 12 " 1
+count "comment: no prior success: nothing else" "$GH_LOG" "pr comment" 1
+has "comment: no prior success: notice says so" "$out$err" "::notice::"
+FAKE_RELEASE_RUNS=$(runs "$(rrun 777 "$HEAD12")") dc "comment: only this run succeeded before: own PR only" 0 "$HEAD12" "$A" "" "$RUN"
+count "comment: only this run: nothing else" "$GH_LOG" "pr comment" 1
+
+# Lookup errors are failures, never warnings.
+FAKE_WORKFLOW_ID_EXIT=1 dc "comment: workflow id lookup error exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+nologs "comment: lookup error: no comment" "$GH_LOG" "pr comment"
+FAKE_WORKFLOW_ID=nope dc "comment: garbage workflow id exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+FAKE_RELEASE_RUNS_EXIT=1 dc "comment: run list error exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+nologs "comment: run list error: no comment" "$GH_LOG" "pr comment"
+FAKE_RELEASE_RUNS=garbage dc "comment: garbage run list exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+FAKE_RELEASE_RUNS=$(runs "$(rrun 500 nope)") dc "comment: garbage head_sha exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+FAKE_RELEASE_RUNS=$(runs "$(rrun 500 "$ELSEWHERE")") dc "comment: prior success not an ancestor exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+has "comment: not an ancestor: says so" "$err" "ancestor"
+nologs "comment: not an ancestor: no comment" "$GH_LOG" "pr comment"
+FAKE_RELEASE_RUNS=$(runs "$(rrun 500 "$(printf 'e%.0s' $(seq 40))")") dc "comment: prior success not in the checkout exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
+GITHUB_RUN_ID='' dc "comment usage: GITHUB_RUN_ID unset" 64 "$HEAD12" "$A" "$B" "$RUN"
+
 # A merge commit whose subject is not "Merge pull request #N": its PRs from the API.
 G -C "$S" commit -q --allow-empty -m "feat: squashed change"
 HEAD13=$(git -C "$S" rev-parse HEAD)
+FAKE_RELEASE_RUNS=$(runs "$(rrun 501 "$HEAD12")")
 FAKE_PULLS='[{"number":13}]' dc "comment: own PR from the API exits 0" 0 "$HEAD13" "$A" "" "$RUN"
 logs "comment: asks the API for the commit's PRs" "$GH_LOG" "api repos/$REPO/commits/$HEAD13/pulls"
 count "comment: own PR from the API: #13" "$GH_LOG" "pr comment 13 " 1
@@ -370,6 +412,7 @@ count "comment: own PR from the API: #13" "$GH_LOG" "pr comment 13 " 1
 FAKE_PULLS='[]' dc "comment: no PR at all exits 1" 1 "$HEAD13" "$A" "" "$RUN"
 has "comment: no PR: says so" "$err" "no PR"
 nologs "comment: no PR: no comment" "$GH_LOG" "pr comment"
+FAKE_RELEASE_RUNS=$(runs "$(rrun 500 "$DEPLOYED")")
 FAKE_COMMENT_EXIT=1 dc "comment: gh failure exits 1" 1 "$HEAD12" "$A" "$B" "$RUN"
 dc "comment usage: no args" 64
 dc "comment usage: bad digest" 64 "$HEAD12" sha256:x "$B" "$RUN"

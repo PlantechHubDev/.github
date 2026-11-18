@@ -15,7 +15,7 @@
 #       permissions:
 #         contents: read        # service history for the PR list
 #         id-token: write       # OIDC to AWS (guard, ECR retag, ECS deploy, read-only checks)
-#         actions: read         # the merge_group run of the merged commit (green gate)
+#         actions: read         # the merge_group run (green gate); the last successful release (PR range)
 #         pull-requests: write  # the deployment comment on each carried PR
 #       with:
 #         service-name: example-service
@@ -32,7 +32,8 @@
 # deploys. Each step runs only if every step before it succeeded:
 #   1. the inputs (checks-ref must be a release tag vX.Y.Z);
 #   1a. the tip check (scripts/release-is-tip.sh): this commit is still the tip of master, so a
-#      re-run of an old release run never rolls prod back without approval;
+#      re-run of an old release run never rolls prod back without approval (usually a newer
+#      merge landed first, and its release deploys this change too);
 #   2. the green gate (scripts/queue-run-green.sh): the merge_group run of ci-workflow for exactly
 #      this commit concluded success, its ci-ok, image and pth-sim jobs succeeded, and no job
 #      failed or was cancelled;
@@ -48,8 +49,10 @@
 #      line in the new deployment's task log streams (running or stopped) since the deploy
 #      started, at least one alarm named alarm-prefix* and none in ALARM;
 #   6. the deployment comment, the change record (scripts/deploy-comment.sh): on the merge's own
-#      PR(s) and every PR since the previous image's commit, once per deploy (a hidden marker
-#      makes re-runs idempotent; no PR at all fails), repeated in the step summary.
+#      PR(s) and every PR since the commit of the last successful run of this workflow on master
+#      (blocked and failed runs never count, so no merge's PR is dropped), once per deploy (a
+#      hidden marker makes re-runs idempotent; no PR at all, or a lookup error, fails), repeated
+#      in the step summary.
 # A failure before step 3's retag changes nothing in prod. A failure after it fails the run
 # loudly: :master already names the new image (the merge was fully green), and recovery is a
 # revert PR through the queue, or a change-review record or break-glass for a faster path.

@@ -11,7 +11,7 @@
 #   tag (or none), or no container of the repository exits 3 with an ::error:: naming the image:
 #   nothing is written to AWS and nothing in prod changes.
 # - Previous: the digest :master names before the retag (scripts/ecr-existing-digest.sh), for the
-#   deployment comment's previous image and PR range. Empty when there is no :master yet, or when
+#   deployment comment's text only ("replaces <digest>"). Empty when there is no :master yet, or when
 #   :master already names the new image (a re-run: the previous one is then unknown).
 # - Retag: sha-<7> is tagged master with scripts/ecr-retag.sh (same manifest, no rebuild). A
 #   re-run on the same merge (master already names that image) exits 0.
