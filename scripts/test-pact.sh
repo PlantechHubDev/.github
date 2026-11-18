@@ -37,6 +37,7 @@ exists() { if [ -f "$2" ]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 
 DB=$HERE/pact/default-branch.sh PUSH=$HERE/pact/oci-push.sh PULL=$HERE/pact/oci-pull.sh
 RESULTS=$HERE/pact/results.sh
+SUMMARY=$HERE/pact/show-summary.sh
 GATEPROV=$HERE/pact/gate-providers.sh DIGEST=$HERE/pact/digest.sh GATE=$HERE/pact/gate.sh BASEREF=$HERE/pact/base-ref.sh
 G=$FIX/gate
 # digest_of <pact> <description>: the digest digest.sh prints for that interaction.
@@ -423,6 +424,28 @@ pull_command_not_found_fails() {
   hasnt "pull_command_not_found_fails: not skipped" "not readable"
   has "pull_command_not_found_fails: error" "::error::"
 }
+show_summary_prints_command_lines() {
+  reset; mkdir -p "$T/sum"
+  printf '::notice::verified 10 active consumer pacts\nplain log line\n' > "$T/sum/summary.txt"
+  printf '::warning::pending pact failed: consumer-a\n::error::boom\n  ::notice::indented is not a command\n' > "$T/sum/pending-warnings.txt"
+  echo '::notice::in a json file' > "$T/sum/ignored.json"
+  run "show_summary_prints_command_lines" 0 bash "$SUMMARY" "$T/sum"
+  has "show_summary_prints_command_lines: notice" "::notice::verified 10 active consumer pacts"
+  has "show_summary_prints_command_lines: warning" "::warning::pending pact failed: consumer-a"
+  has "show_summary_prints_command_lines: error" "::error::boom"
+  hasnt "show_summary_prints_command_lines: non-command line ignored" "plain log line"
+  hasnt "show_summary_prints_command_lines: indented ignored" "indented is not"
+  hasnt "show_summary_prints_command_lines: only .txt files" "in a json file"
+  hasnt "show_summary_prints_command_lines: no missing-summary notice" "no contract verification summary"
+}
+show_summary_missing_dir_notice() {
+  reset
+  run "show_summary_missing_dir_notice" 0 bash "$SUMMARY" "$T/nope"
+  has "show_summary_missing_dir_notice: notice" "::notice::no contract verification summary found under $T/nope"
+  mkdir -p "$T/emptysum"; printf 'no commands here\n' > "$T/emptysum/a.txt"
+  run "show_summary_no_command_lines_notice" 0 bash "$SUMMARY" "$T/emptysum"
+  has "show_summary_no_command_lines_notice: notice" "::notice::no contract verification summary found under $T/emptysum"
+}
 
 default_branch_uses_event
 default_branch_falls_back_to_api
@@ -476,4 +499,6 @@ gate_empty_new_pact_fails
 gate_null_description_still_gated
 digest_null_description_and_bad_input
 pull_command_not_found_fails
+show_summary_prints_command_lines
+show_summary_missing_dir_notice
 exit $status

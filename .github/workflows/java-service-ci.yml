@@ -158,6 +158,12 @@ jobs:
           PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
         run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
 
+      # Gradle hides test stdout, so a provider build writes its ::notice::/::warning:: lines to
+      # build/reports/pact/*.txt; printing them here turns them into annotations.
+      - name: Show contract verification summary
+        if: always() && inputs.pact-fetch-consumers != ''
+        run: bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact || true
+
       - name: Upload consumer contracts
         if: always() && inputs.pact-gate-providers != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
