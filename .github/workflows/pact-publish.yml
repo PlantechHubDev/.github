@@ -14,7 +14,7 @@
 # Job publish: looks for the artifact in this run (a notice and no push when it is absent; a failed
 # download fails the job), then on the
 # default branch pushes the *.json files to ghcr.io/plantechhubdev/<package> tagged `default`
-# and `sha-<7>`. Other branches only print a notice. The package needs a "Manage Actions access"
+# and `sha-<7>`. Other branches only print a notice. With input `tag`, only that tag is pushed, on any branch. The package needs a "Manage Actions access"
 # grant for the consumer repo (Write), and one for each provider repo (Read).
 
 name: pact-publish
@@ -34,6 +34,10 @@ on:
         description: Name of the artifact holding the *.json contract files.
         type: string
         default: pacts
+      tag:
+        description: Push only this tag (e.g. pr-7 or default), on any branch, instead of default and sha-<7> on the default branch only.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -50,8 +54,10 @@ jobs:
       - name: Check the inputs
         env:
           PACKAGE: ${{ inputs.package }}
+          TAG: ${{ inputs.tag }}
         run: |
           [[ $PACKAGE =~ ^[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::package must be lower-case letters, digits, dots, dashes and underscores (got '$PACKAGE')"; exit 1; }
+          [[ -z $TAG || $TAG =~ ^pr-[0-9]+$|^[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::tag must be pr-<n> or lower-case letters, digits, dots, dashes and underscores (got '$TAG')"; exit 1; }
 
       - name: Check out the shared scripts at checks-ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -100,10 +106,11 @@ jobs:
         if: steps.find.outputs.found == 'true'
         env:
           PACKAGE: ${{ inputs.package }}
+          TAG: ${{ inputs.tag }}
           EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           ORAS_REGISTRY_CONFIG: ${{ runner.temp }}/oras-auth.json
-        run: bash .pth-checks/scripts/pact/oci-push.sh "$PACKAGE" pacts "$GITHUB_SHA"
+        run: bash .pth-checks/scripts/pact/oci-push.sh ${TAG:+--tag "$TAG"} "$PACKAGE" pacts "$GITHUB_SHA"
 
       - name: Remove the registry credentials
         if: always()

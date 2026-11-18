@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests scripts/pact/{default-branch,oci-push,oci-pull}.sh with stub `oras` and `gh`
+# Tests scripts/pact/{default-branch,oci-push,oci-pull,results}.sh with stub `oras` and `gh`
 # (scripts/fixtures/pact/bin) first on PATH, so nothing touches GHCR or GitHub.
 # Usage: bash scripts/test-pact.sh   (exit 0 when every case passes)
 set -uo pipefail
@@ -36,6 +36,7 @@ empty()  { if [ -s "$2" ]; then fail "$1" "$(basename "$2") not empty: $(cat "$2
 exists() { if [ -f "$2" ]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 
 DB=$HERE/pact/default-branch.sh PUSH=$HERE/pact/oci-push.sh PULL=$HERE/pact/oci-pull.sh
+RESULTS=$HERE/pact/results.sh
 GATEPROV=$HERE/pact/gate-providers.sh DIGEST=$HERE/pact/digest.sh GATE=$HERE/pact/gate.sh BASEREF=$HERE/pact/base-ref.sh
 G=$FIX/gate
 # digest_of <pact> <description>: the digest digest.sh prints for that interaction.
@@ -256,6 +257,99 @@ gate_merge_group_base_ref() {
   if [ "$out" = develop ]; then pass "gate_pr_base_ref: develop"; else fail "gate_pr_base_ref" "got '$out'"; fi
 }
 
+# results_layout <report-fixture> [source]: pacts-root/<source>/pacts-consumer-a/ with the 3-interaction pact,
+# reports-dir/<source>/provider-b.json from the fixture.
+results_layout() {
+  local src=${2:-default}
+  reset; rm -rf "$T/pr" "$T/rp"
+  mkdir -p "$T/pr/$src/pacts-consumer-a" "$T/rp/$src"
+  cp "$FIX/results/consumer-a-provider-b.json" "$T/pr/$src/pacts-consumer-a/"
+  cp "$FIX/results/$1" "$T/rp/$src/provider-b.json"
+}
+# run_results <name> <want-exit> <args...>: results.sh; stdout (the JSON) in $out, stderr in $err.
+run_results() {
+  local name=$1 want=$2; shift 2
+  out=$(bash "$RESULTS" "$@" 2>"$T/err"); code=$?; err=$(cat "$T/err")
+  if [ "$code" = "$want" ]; then pass "$name"; else fail "$name" "exit $code want $want; output: $out $err"; fi
+}
+# stat_of <description>: status of that interaction in $out.
+stat_of() { jq -r --arg d "$1" '.interactions[] | select(.description == $d) | .status' <<<"$out"; }
+results_maps_report_to_digest() {
+  results_layout report-pass-fail.json
+  run_results "results_maps_report_to_digest" 0 provider-b "$T/pr" "$T/rp" abc1234def
+  P=$FIX/results/consumer-a-provider-b.json
+  if jq -e '.provider == "provider-b" and .sha == "abc1234def" and (.interactions | length) == 3' <<<"$out" >/dev/null; then pass "results_maps_report_to_digest: header and count"; else fail "results_maps_report_to_digest" "$out"; fi
+  if [ "$(stat_of "a request for a thing")" = passed ] && [ "$(stat_of "a request to delete a thing")" = failed ]; then pass "results_maps_report_to_digest: statuses"; else fail "results_maps_report_to_digest: statuses" "$out"; fi
+  d=$(digest_of "$P" "a request to delete a thing")
+  if jq -e --arg d "$d" '.interactions[] | select(.description == "a request to delete a thing") | .digest == $d and .consumer == "consumer-a" and .source == "default"' <<<"$out" >/dev/null; then pass "results_maps_report_to_digest: digest, consumer, source"; else fail "results_maps_report_to_digest: digest" "$out"; fi
+}
+results_missing_from_report_fails_closed() {
+  results_layout report-pass-fail.json
+  run_results "results_missing_from_report_fails_closed" 0 provider-b "$T/pr" "$T/rp" abc1234
+  if [ "$(stat_of "a request to create a thing")" = failed ]; then pass "results_missing_from_report_fails_closed: failed"; else fail "results_missing_from_report_fails_closed" "$out"; fi
+  if [[ $err == *"::warning::"*"a request to create a thing"* ]]; then pass "results_missing_from_report_fails_closed: warning"; else fail "results_missing_from_report_fails_closed: warning" "$err"; fi
+}
+pr_failure_recorded_not_fatal() {
+  results_layout report-all-failed.json pr-12
+  run_results "pr_failure_recorded_not_fatal" 0 provider-b "$T/pr" "$T/rp" abc1234
+  if jq -e '(.interactions | length) == 3 and all(.interactions[]; .status == "failed" and .source == "pr-12")' <<<"$out" >/dev/null; then pass "pr_failure_recorded_not_fatal: all failed from pr-12"; else fail "pr_failure_recorded_not_fatal" "$out"; fi
+}
+results_no_report_for_source_fails_closed() {
+  results_layout report-pass-fail.json; rm -rf "$T/rp/default"
+  run_results "results_no_report_for_source_fails_closed" 0 provider-b "$T/pr" "$T/rp" abc1234
+  if jq -e 'all(.interactions[]; .status == "failed")' <<<"$out" >/dev/null; then pass "results_no_report_for_source_fails_closed: failed"; else fail "results_no_report_for_source_fails_closed" "$out"; fi
+}
+results_ignores_other_providers_pacts() {
+  results_layout report-pass-fail.json
+  jq '.provider.name = "provider-z"' "$FIX/results/consumer-a-provider-b.json" > "$T/pr/default/pacts-consumer-a/consumer-a-provider-z.json"
+  run_results "results_ignores_other_providers_pacts" 0 provider-b "$T/pr" "$T/rp" abc1234
+  if jq -e '(.interactions | length) == 3' <<<"$out" >/dev/null; then pass "results_ignores_other_providers_pacts: only provider-b"; else fail "results_ignores_other_providers_pacts" "$out"; fi
+}
+results_rejects_bad_name() {
+  results_layout report-pass-fail.json
+  run_results "results_rejects_bad_name" 2 'provider-b;x' "$T/pr" "$T/rp" abc1234
+  out=$err; has "results_rejects_bad_name: error" "::error::"
+}
+# tags_file <package> <tag> <days-old>...: write the fake registry's tag list.
+tags_file() {
+  local pkg=$1; shift; : > "$FAKE_ORAS_STORE/$pkg.tags"
+  while [ $# -gt 0 ]; do printf '%s %s\n' "$1" "$(jq -rn --argjson d "$2" 'now - $d * 86400 | todate')" >> "$FAKE_ORAS_STORE/$pkg.tags"; shift 2; done
+}
+pull_pr_tags_age_filter() {
+  reset; tags_file pacts-consumer-a default 1 pr-3 2 pr-9 20 other 1
+  run "pull_pr_tags_age_filter" 0 bash "$PULL" --pr-tags 14 "$T/out" pacts-consumer-a
+  logs "pull_pr_tags_age_filter: young pr tag pulled" "$FAKE_ORAS_LOG" "pacts-consumer-a:pr-3 -o $T/out/pr-3/pacts-consumer-a"
+  nologs "pull_pr_tags_age_filter: old pr tag skipped" "$FAKE_ORAS_LOG" "pull ghcr.io/plantechhubdev/pacts-consumer-a:pr-9"
+  nologs "pull_pr_tags_age_filter: non-pr tag skipped" "$FAKE_ORAS_LOG" "pull ghcr.io/plantechhubdev/pacts-consumer-a:other"
+  logs "pull_pr_tags_age_filter: default still pulled" "$FAKE_ORAS_LOG" "pacts-consumer-a:default -o $T/out/pacts-consumer-a"
+  exists "pull_pr_tags_age_filter: files land in pr dir" "$T/out/pr-3/pacts-consumer-a/consumer-a-provider-b.json"
+}
+pull_pr_tags_unlisted_package_is_notice() {
+  reset
+  run "pull_pr_tags_unlisted_package_is_notice" 0 bash "$PULL" --pr-tags 14 "$T/out" pacts-consumer-a
+  has "pull_pr_tags_unlisted_package_is_notice: notice" "::notice::pacts-consumer-a pr tags not listable"
+}
+pull_pr_tags_rejects_bad_days() {
+  reset
+  run "pull_pr_tags_rejects_bad_days" 2 bash "$PULL" --pr-tags 'x' "$T/out" pacts-consumer-a
+  has "pull_pr_tags_rejects_bad_days: error" "::error::"
+}
+push_explicit_tag() {
+  reset; export EVENT_DEFAULT_BRANCH=develop GITHUB_REF_NAME=feature/x
+  cp "$FIX/consumer-a-provider-b.json" "$T/pacts/"
+  run "push_explicit_tag" 0 bash "$PUSH" --tag pr-7 pacts-consumer-a "$T/pacts" abcdef1234
+  logs "push_explicit_tag: only the pr tag" "$FAKE_ORAS_LOG" "push ghcr.io/plantechhubdev/pacts-consumer-a:pr-7 "
+  nologs "push_explicit_tag: no default tag" "$FAKE_ORAS_LOG" "default"
+  nologs "push_explicit_tag: no sha tag" "$FAKE_ORAS_LOG" "sha-"
+}
+push_rejects_bad_tag() {
+  reset; export EVENT_DEFAULT_BRANCH=develop GITHUB_REF_NAME=develop
+  cp "$FIX/consumer-a-provider-b.json" "$T/pacts/"
+  run "push_rejects_bad_tag" 2 bash "$PUSH" --tag 'pr-7,default' pacts-consumer-a "$T/pacts" abcdef1234
+  has "push_rejects_bad_tag: error" "::error::"
+  empty "push_rejects_bad_tag: no oras call" "$FAKE_ORAS_LOG"
+}
+
 default_branch_uses_event
 default_branch_falls_back_to_api
 default_branch_errors_when_unknown
@@ -287,4 +381,15 @@ gate_providers_no_base_pact_all_new
 gate_providers_skips_missing_pact
 gate_providers_one_failure_fails_all
 gate_providers_rejects_bad_name
+results_maps_report_to_digest
+results_missing_from_report_fails_closed
+pr_failure_recorded_not_fatal
+results_no_report_for_source_fails_closed
+results_ignores_other_providers_pacts
+results_rejects_bad_name
+pull_pr_tags_age_filter
+pull_pr_tags_unlisted_package_is_notice
+pull_pr_tags_rejects_bad_days
+push_explicit_tag
+push_rejects_bad_tag
 exit $status

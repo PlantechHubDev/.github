@@ -3,11 +3,25 @@
 # $FAKE_ORAS_LOG. `pull <host>/<org>/<pkg>:<tag> -o <dir>` copies $FAKE_ORAS_STORE/<pkg>/* into
 # <dir>, unless <pkg> is listed in $FAKE_ORAS_NOT_FOUND, $FAKE_ORAS_UNKNOWN, $FAKE_ORAS_DENIED or $FAKE_ORAS_BROKEN,
 # which fail the way the registry client does. The out dir is created only on a successful
-# pull, as oras does. `login` just drains stdin.
+# pull, as oras does. `repo tags <ref>` prints the first column of $FAKE_ORAS_STORE/<pkg>.tags ("<tag> <created>" lines),
+# `manifest fetch <pkg>:<tag>` prints a manifest whose annotation org.opencontainers.image.created is that
+# line's second column. `login` just drains stdin.
 echo "$*" >> "${FAKE_ORAS_LOG:?}"
 cmd=${1:-}
 case "$cmd" in
   login) cat >/dev/null; exit 0 ;;
+  repo|manifest)
+    ref=""
+    for a in "$@"; do case "$a" in ghcr.io/*) ref=$a ;; esac; done
+    pkg=${ref#*/*/}; pkg=${pkg%%:*}
+    tags=${FAKE_ORAS_STORE:?}/$pkg.tags
+    [ -f "$tags" ] || { echo "Error: $ref: not found" >&2; exit 1; }
+    if [ "$cmd $2" = "repo tags" ]; then cut -d' ' -f1 "$tags"
+    elif [ "$cmd $2" = "manifest fetch" ]; then
+      tag=${ref##*:}
+      created=$(awk -v t="$tag" '$1 == t { print $2 }' "$tags")
+      printf '{"schemaVersion":2,"annotations":{"org.opencontainers.image.created":"%s"}}\n' "$created"
+    else echo "stub oras: unrecognised call: $*" >&2; exit 1; fi ;;
   push) exit 0 ;;
   pull)
     ref=""; out=""; prev=""
