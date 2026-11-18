@@ -240,7 +240,8 @@ jobs:
 
       # Coverage gate. Runs after the build and fails the job. On pull requests,
       # at least 80% of the changed lines must be covered (diff-cover against the
-      # base branch). On every event, overall line coverage must not drop more
+      # base branch). Not on merge_group: github.base_ref is empty there, and the
+      # diff was gated when the PR ran. On every event, overall line coverage must not drop more
       # than 0.1 points below the committed coverage-baseline file. A repo with no
       # baseline fails here: add one (coverage-ratchet.py --write) in the PR that
       # adopts this version.

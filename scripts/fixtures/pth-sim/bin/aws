@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Fake aws for test-pth-sim.sh and test-deployed-sha.sh. Logs argv and the profile (one line,
+# "<argv> [profile <AWS_PROFILE>]") to $AWS_LOG.
+# Answers from env (no real AWS):
+#   FAKE_SSO=expired          every call fails with the AWS CLI's expired-SSO-token error (exit 255)
+#   FAKE_SSO=missing          every call fails with "Unable to locate credentials" (exit 253)
+#   FAKE_DEPLOYED / FAKE_DEPLOYED_2   digests the running prod tasks report (_2: a second task)
+#   FAKE_QUEUE                the queue image digest known to the service's ECR repository
+#   FAKE_TAGS                 space-separated tags on FAKE_DEPLOYED (default "master sha-1111111")
+#   FAKE_URI                  the repositoryUri describe-repositories returns (default registry.example/<repo>)
+# ecr describe-images on any other digest: ImageNotFoundException (exit 254).
+echo "$* [profile ${AWS_PROFILE:-}]" >> "${AWS_LOG:-/dev/null}"
+# FAKE_SSO_FROM=sts|sts-missing: the session expires (or vanishes) from the first `sts` call on,
+# standing in for an SSO session that ran out while the run waited for a stack.
+case "${FAKE_SSO_FROM:-} $1" in
+  "sts sts") echo "Error when retrieving token from sso: Token has expired and refresh failed" >&2; exit 255 ;;
+  "sts-missing sts") echo "Unable to locate credentials. You can configure credentials by running \"aws configure\"." >&2; exit 253 ;;
+esac
+case "${FAKE_SSO:-}" in
+  expired) echo "Error when retrieving token from sso: Token has expired and refresh failed" >&2; exit 255 ;;
+  missing) echo "Unable to locate credentials. You can configure credentials by running \"aws configure\"." >&2; exit 253 ;;
+esac
+repo=""; digest=""; prev=""
+for a in "$@"; do
+  case "$prev" in
+    --repository-name | --repository-names) repo=$a ;;
+    --image-ids) digest=${a#imageDigest=} ;;
+  esac
+  prev=$a
+done
+case "$1 $2" in
+  "ecs list-tasks")
+    if [ -n "${FAKE_DEPLOYED_2:-}" ]; then echo '{"taskArns":["arn:task/1","arn:task/2"]}'
+    else echo '{"taskArns":["arn:task/1"]}'; fi ;;
+  "ecs describe-tasks")
+    svc=${FAKE_SERVICE:-example-service}
+    t1="{\"taskArn\":\"arn:task/1\",\"lastStatus\":\"RUNNING\",\"containers\":[{\"name\":\"app\",\"image\":\"registry.example/$svc:master\",\"imageDigest\":\"${FAKE_DEPLOYED:-}\"}]}"
+    if [ -n "${FAKE_DEPLOYED_2:-}" ]; then
+      t2="{\"taskArn\":\"arn:task/2\",\"lastStatus\":\"RUNNING\",\"containers\":[{\"name\":\"app\",\"image\":\"registry.example/$svc:master\",\"imageDigest\":\"$FAKE_DEPLOYED_2\"}]}"
+      echo "{\"tasks\":[$t1,$t2]}"
+    else echo "{\"tasks\":[$t1]}"; fi ;;
+  "ecr describe-repositories")
+    uri=${FAKE_URI-registry.example/$repo}
+    jq -nc --arg r "$repo" --arg u "$uri" '{repositories: [{repositoryName: $r, repositoryUri: $u}]}' ;;
+  "sts get-caller-identity")
+    echo '{"UserId":"x","Account":"123456789","Arn":"arn:aws:sts::123456789:assumed-role/x/y"}' ;;
+  "ecr describe-images")
+    if [ -n "$digest" ] && [ "$digest" = "${FAKE_DEPLOYED:-}" ]; then
+      tags=$(printf '%s' "${FAKE_TAGS-master sha-1111111}" | jq -Rc 'split(" ") | map(select(. != ""))')
+      echo "{\"imageDetails\":[{\"repositoryName\":\"$repo\",\"imageDigest\":\"$digest\",\"imageTags\":$tags}]}"
+    elif [ -n "$digest" ] && [ "$digest" = "${FAKE_QUEUE:-}" ]; then
+      echo "{\"imageDetails\":[{\"repositoryName\":\"$repo\",\"imageDigest\":\"$digest\",\"imageTags\":[\"sha-2222222\"]}]}"
+    else
+      echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation: The image with imageId {imageDigest:'$digest'} does not exist within the repository with name '$repo'" >&2
+      exit 254
+    fi ;;
+  *) echo "fake aws: unexpected call: $*" >&2; exit 99 ;;
+esac

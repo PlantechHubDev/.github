@@ -1,0 +1,15 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  ci-ok:
+    name: ci-ok (push)
+    runs-on: ubuntu-latest
+    steps:
+      - run: true

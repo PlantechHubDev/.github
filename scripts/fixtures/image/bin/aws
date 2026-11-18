@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake aws for test-image-digest.sh: answers `ecr describe-images` from FAKE_AWS_MODE.
+# found: prints describe-images JSON; missing: ImageNotFoundException on stderr, exit 254;
+# denied: AccessDeniedException on stderr, exit 254.
+case "${FAKE_AWS_MODE:-}" in
+  found) cat "$(dirname "$0")/../describe-found.json" ;;
+  missing) echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation: not found" >&2; exit 254 ;;
+  denied) echo "An error occurred (AccessDeniedException) when calling the DescribeImages operation: denied" >&2; exit 254 ;;
+  *) echo "fake aws: FAKE_AWS_MODE unset" >&2; exit 99 ;;
+esac
