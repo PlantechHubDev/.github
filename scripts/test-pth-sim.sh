@@ -68,8 +68,9 @@ for v in $RUNNER_ENV; do
   has "runner env: $v unset is named" "$v"
 done
 : > "$AWS_LOG"; : > "$GH_LOG"
-# shellcheck disable=SC2086  # one -u per name
-out=$(env $(printf -- '-u %s ' $RUNNER_ENV) bash "$HERE/pth-sim.sh" $SVC "$Q" "$QSHA" 2>&1); code=$?
+unset_all=()
+for v in $RUNNER_ENV; do unset_all+=(-u "$v"); done
+out=$(env "${unset_all[@]}" bash "$HERE/pth-sim.sh" $SVC "$Q" "$QSHA" 2>&1); code=$?
 if [ "$code" = 64 ]; then pass "runner env: all unset exits 64"; else fail "runner env: all unset exits 64" "exit $code; output: $out"; fi
 for v in $RUNNER_ENV; do has "runner env: all unset names $v" "$v"; done
 last "runner env: RESULT 64 is the last line" "RESULT 64"
