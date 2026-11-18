@@ -48,6 +48,10 @@ on:
         description: Space-separated GHCR package names of consumer contracts (Pact files) this service, as provider, must verify, e.g. "pacts-consumer-a pacts-consumer-b". Each is pulled from its `default` tag into $RUNNER_TEMP/pacts before the build, and PACT_FOLDER points there. Empty (the default) fetches nothing. A package that is unpublished, or has no Actions access grant for this repo, is skipped with a notice.
         type: string
         default: ''
+      pact-gate-providers:
+        description: Space-separated names of provider services whose contract results gate this consumer's pull requests, e.g. "provider-b". For each, the PR's pact file build/pacts/<this repo>-<provider>.json is compared with the one on the default branch, and every added or changed interaction must have passed on the provider's default branch (results published as pact-results-<provider>). Runs on pull_request and merge_group events targeting the default branch only. Empty (the default) adds no gate.
+        type: string
+        default: ''
     secrets:
       PUBLISH_TOKEN:
         description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
@@ -149,6 +153,72 @@ jobs:
           PACKAGES_USER: ${{ github.actor }}
           PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
         run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
+
+      - name: Upload consumer contracts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pacts
+          path: build/pacts/*.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Check out the shared scripts for the contract gate
+        if: inputs.pact-gate-providers != '' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks-pact-gate
+          persist-credentials: false
+
+      - name: Consumer contract gate
+        if: inputs.pact-gate-providers != '' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        env:
+          PROVIDERS: ${{ inputs.pact-gate-providers }}
+          CONSUMER: ${{ github.event.repository.name }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scripts=.pth-checks-pact-gate/scripts/pact
+          name_re='^[a-z0-9][a-z0-9._-]*$'
+          [[ $CONSUMER =~ $name_re ]] || { echo "::error::Unexpected repository name '$CONSUMER'"; exit 1; }
+          for provider in $PROVIDERS; do
+            [[ $provider =~ $name_re ]] || { echo "::error::Invalid provider name '$provider' in pact-gate-providers"; exit 1; }
+          done
+          BASE_REF=$(bash "$scripts/base-ref.sh")
+          DEFAULT_BRANCH=$(bash "$scripts/default-branch.sh")
+          export BASE_REF DEFAULT_BRANCH
+          if [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+            echo "::notice::base $BASE_REF is not the default branch; contract gate skipped"
+            exit 0
+          fi
+          # Credentials go to a temporary file, removed when this step ends (the build already ran).
+          export ORAS_REGISTRY_CONFIG="$RUNNER_TEMP/oras-gate-auth.json"
+          trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
+          bash "$scripts/install-oras.sh"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          printf %s "$TOKEN" | oras login --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          gate_dir="$RUNNER_TEMP/pact-gate"
+          rc=0
+          for provider in $PROVIDERS; do
+            new="build/pacts/$CONSUMER-$provider.json"
+            if [ ! -f "$new" ]; then
+              echo "::notice::No $new written by the build; contract gate for $provider skipped"
+              continue
+            fi
+            bash "$scripts/oci-pull.sh" "$gate_dir" "pact-results-$provider" "pacts-$CONSUMER"
+            base="$gate_dir/pacts-$CONSUMER/$CONSUMER-$provider.json"
+            results="$gate_dir/pact-results-$provider/results.json"
+            [ -f "$base" ] || base=""
+            [ -f "$results" ] || results=""
+            bash "$scripts/gate.sh" "$provider" "$new" "$base" "$results" || rc=1
+          done
+          exit $rc
 
       - name: Check out the shared scripts at checks-ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

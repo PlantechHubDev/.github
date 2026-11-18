@@ -36,6 +36,18 @@ empty()  { if [ -s "$2" ]; then fail "$1" "$(basename "$2") not empty: $(cat "$2
 exists() { if [ -f "$2" ]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 
 DB=$HERE/pact/default-branch.sh PUSH=$HERE/pact/oci-push.sh PULL=$HERE/pact/oci-pull.sh
+DIGEST=$HERE/pact/digest.sh GATE=$HERE/pact/gate.sh BASEREF=$HERE/pact/base-ref.sh
+G=$FIX/gate
+# digest_of <pact> <description>: the digest digest.sh prints for that interaction.
+digest_of() { bash "$DIGEST" "$1" | grep -F -- "  $2" | head -1 | cut -d' ' -f1; }
+# results <file> <status-for-changed-and-added|none> ...: write a results file with the given digests as
+# "<digest>:<status>" arguments.
+results() {
+  local f=$1; shift
+  printf '%s\n' "$@" | jq -R -s '{provider:"provider-b",sha:"abc1234",interactions:(split("\n")|map(select(length>0)|split(":")|{consumer:"consumer-a",source:"default",description:"x",digest:.[0],status:.[1]}))}' > "$f"
+}
+# shellcheck disable=SC2329  # called through run()
+gate() { BASE_REF=develop DEFAULT_BRANCH=develop bash "$GATE" "$@"; }
 
 default_branch_uses_event() {
   reset; export EVENT_DEFAULT_BRANCH=develop
@@ -128,6 +140,71 @@ pull_other_error_fails() {
   has "pull_other_error_fails: error shown" "connection refused"
 }
 
+digest_ignores_description_and_metadata() {
+  reset
+  a=$(digest_of "$G/base.json" "a request for a thing"); b=$(digest_of "$G/meta-variant.json" "the same call")
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then pass "digest_ignores_description_and_metadata"; else fail "digest_ignores_description_and_metadata" "'$a' vs '$b'"; fi
+  c=$(digest_of "$G/matcher-variant.json" "a request for a thing")
+  if [ -n "$c" ] && [ "$a" != "$c" ]; then pass "digest_changes_with_matcher"; else fail "digest_changes_with_matcher" "'$a' vs '$c'"; fi
+  run "digest_line_format" 0 bash "$DIGEST" "$G/base.json"
+  if grep -qE '^[0-9a-f]{64}  a request for a thing$' <<<"$out"; then pass "digest_line_format: sha256, two spaces, description"; else fail "digest_line_format" "$out"; fi
+}
+gate_unchanged_passes() {
+  reset
+  results "$T/r.json" "x:passed"
+  run "gate_unchanged_passes" 0 gate provider-b "$G/base.json" "$G/base.json" "$T/r.json"
+  has "gate_unchanged_passes: warns" "::warning::"
+  hasnt "gate_unchanged_passes: no error" "::error::"
+}
+gate_new_passed_passes() {
+  reset
+  d1=$(digest_of "$G/new.json" "a request to delete a thing"); d2=$(digest_of "$G/new.json" "a request to create a thing")
+  results "$T/r.json" "$d1:passed" "$d2:passed"
+  run "gate_new_passed_passes" 0 gate provider-b "$G/new.json" "$G/base.json" "$T/r.json"
+  hasnt "gate_new_passed_passes: no error" "::error::"
+}
+gate_new_unverified_fails() {
+  reset
+  d1=$(digest_of "$G/new.json" "a request to delete a thing")
+  results "$T/r.json" "$d1:passed"
+  run "gate_new_unverified_fails" 1 gate provider-b "$G/new.json" "$G/base.json" "$T/r.json"
+  has "gate_new_unverified_fails: names it" "a request to create a thing"
+  has "gate_new_unverified_fails: design text" "has not verified this call yet"
+  has "gate_new_unverified_fails: provider named" "provider-b's default branch"
+}
+gate_changed_failed_fails() {
+  reset
+  d1=$(digest_of "$G/new.json" "a request to delete a thing"); d2=$(digest_of "$G/new.json" "a request to create a thing")
+  results "$T/r.json" "$d1:failed" "$d2:passed"
+  run "gate_changed_failed_fails" 1 gate provider-b "$G/new.json" "$G/base.json" "$T/r.json"
+  has "gate_changed_failed_fails: names it" "a request to delete a thing"
+}
+gate_no_results_is_notice() {
+  reset
+  run "gate_no_results_is_notice" 0 gate provider-b "$G/new.json" "$G/base.json" ""
+  has "gate_no_results_is_notice: notice" "not onboarded"
+  run "gate_missing_results_file_is_notice" 0 gate provider-b "$G/new.json" "$G/base.json" "$T/nope.json"
+  has "gate_missing_results_file_is_notice: notice" "not onboarded"
+}
+gate_no_base_pact_all_new() {
+  reset
+  results "$T/r.json" "x:passed"
+  run "gate_no_base_pact_all_new" 1 gate provider-b "$G/base.json" "" "$T/r.json"
+  has "gate_no_base_pact_all_new: error" "::error::"
+}
+gate_skips_non_default_base() {
+  reset
+  run "gate_skips_non_default_base" 0 env BASE_REF=demo DEFAULT_BRANCH=develop bash "$GATE" provider-b "$G/new.json" "$G/base.json" ""
+  has "gate_skips_non_default_base: notice" "base demo is not the default branch; contract gate skipped"
+}
+gate_merge_group_base_ref() {
+  reset
+  run "gate_merge_group_base_ref" 0 env GITHUB_BASE_REF= MERGE_GROUP_BASE_REF=refs/heads/develop bash "$BASEREF"
+  if [ "$out" = develop ]; then pass "gate_merge_group_base_ref: develop"; else fail "gate_merge_group_base_ref" "got '$out'"; fi
+  run "gate_pr_base_ref" 0 env GITHUB_BASE_REF=develop MERGE_GROUP_BASE_REF= bash "$BASEREF"
+  if [ "$out" = develop ]; then pass "gate_pr_base_ref: develop"; else fail "gate_pr_base_ref" "got '$out'"; fi
+}
+
 default_branch_uses_event
 default_branch_falls_back_to_api
 default_branch_errors_when_unknown
@@ -143,4 +220,13 @@ pull_without_registry_config_omits_flag
 pull_rejects_bad_package_name
 push_uses_registry_config
 pull_other_error_fails
+digest_ignores_description_and_metadata
+gate_unchanged_passes
+gate_new_passed_passes
+gate_new_unverified_fails
+gate_changed_failed_fails
+gate_no_results_is_notice
+gate_no_base_pact_all_new
+gate_skips_non_default_base
+gate_merge_group_base_ref
 exit $status

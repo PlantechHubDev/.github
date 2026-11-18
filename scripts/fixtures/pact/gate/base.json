@@ -1,0 +1,18 @@
+{
+  "consumer": { "name": "consumer-a" },
+  "provider": { "name": "provider-b" },
+  "interactions": [
+    {
+      "description": "a request for a thing",
+      "providerStates": [{ "name": "thing 1 exists" }],
+      "request": { "method": "GET", "path": "/things/1" },
+      "response": { "status": 200, "body": { "id": 1 } }
+    },
+    {
+      "description": "a request to delete a thing",
+      "request": { "method": "DELETE", "path": "/things/1" },
+      "response": { "status": 204 }
+    }
+  ],
+  "metadata": { "pactSpecification": { "version": "3.0.0" } }
+}
