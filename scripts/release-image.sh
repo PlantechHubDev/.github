@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # release-image.sh <service> <merge-sha> < pins: pick the image to deploy, <service>:sha-<first 7 of
 # merge-sha> (the image the merge queue built and simulated), and tag it master only when that is
-# safe. stdin is the service's prod units on infrastructure-live master, one "<path> <pin>" line
+# safe. stdin is the service's prod units on the infrastructure repo's master, one "<path> <pin>" line
 # per unit in every region, as `open-deploy-pr.sh --pins <service>` prints them (<pin>: digest,
 # tag:<name> or unparseable).
 #

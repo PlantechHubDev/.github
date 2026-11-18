@@ -3,26 +3,27 @@
 # open-deploy-pr.sh --base-digest <service>
 # open-deploy-pr.sh --pins <service>
 #
-# Run in an infrastructure-live checkout (remote origin). Proposes the prod deploy of a released
-# image: on branch deploy/<service>-<first 7 of merge-sha> it changes only the `image = "..."`
-# line of plantechhub/us-east-1/prod/<service>/terragrunt.hcl to <registry>/<service>@<digest>
+# Run in a checkout of the infrastructure repo INFRA_REPO (remote origin). Proposes the prod deploy
+# of a released image: on branch deploy/<service>-<first 7 of merge-sha> it changes only the
+# `image = "..."` line of the unit PROD_UNIT to <registry>/<service>@<digest>
 # (registry and repository taken from that line; indentation, alignment and any trailing comment
 # kept), commits "deploy(<service>): pin <sha7>", pushes, and opens a PR into master titled
 # "deploy(<service>): <sha7>". The body lists the service PRs ("Merge pull request #N" commits on
 # the first-parent history <deployed>..<merge-sha>), the simulation link (or the text "simulation
 # run: not found") and "Rollback digest: <digest master pins now>". Every other open PR whose head
-# is deploy/<service>-<7 hex> in infrastructure-live itself (never a fork's) is closed with a
+# is deploy/<service>-<7 hex> in INFRA_REPO itself (never a fork's) is closed with a
 # comment naming the new PR.
 # A re-run reuses the branch (adds a commit only if the pin differs; never force-pushes) and the
 # open PR on it (body updated). If origin master already pins <digest>, it does nothing.
 #
-# --base-digest prints "<digest> <pin>" for what origin master pins now: "<digest> digest" for a
+# --base-digest prints "<digest> <pin>" for what PROD_UNIT on origin master pins now: "<digest> digest" for a
 # digest pin, or "<tag's digest in ECR> tag:<tag>" for a tag pin (e.g. :master). Call it before any
 # retag; pass the digest as BASE_DIGEST and the pin to release-image.sh (which then leaves a
 # pinned :master alone).
 #
 # --pins prints "<path> <pin>" for every prod unit of the service on origin master, in every
-# region (plantechhub/<region>/prod/<service>/terragrunt.hcl). <pin> is "digest", "tag:<name>", or
+# region: every path in `git ls-tree -r --name-only` that matches the ERE PROD_UNITS_PATTERN.
+# <pin> is "digest", "tag:<name>", or
 # "unparseable" when the unit has not exactly one image line of the form above. It reads git only
 # (no AWS). release-image.sh reads this list and leaves :master alone while any unit pins :master
 # or is unparseable (ECR replication would move :master in every region). Exit 0, or 2 when the
@@ -33,6 +34,13 @@
 # deploy PR that could not be closed.
 #
 # Environment:
+#   PROD_UNIT         path of the unit the deploy PR edits (required, except with --pins): the
+#                     caller's input prod-unit
+#   PROD_UNITS_PATTERN  ERE over `git ls-tree -r --name-only` paths that matches every prod unit
+#                     of the service (required with --pins): the caller's input prod-units-pattern
+#                     Both must be non-empty and relative (no leading /), with no "..".
+#   INFRA_REPO        <owner>/<name> of the infrastructure repo (required to open the PR): the
+#                     caller's input infra-repo
 #   SERVICE_REPO      path to a full-history checkout of PlantechHubDev/<service> (required)
 #   BASE_DIGEST       the rollback digest, required when master pins a tag rather than a digest
 #   RETAGGED          true|false (required): release-image.sh's retagged output. The body (a SOC 2
@@ -42,10 +50,9 @@
 #   DEPLOY_GIT_NAME   commit identity: the CI App's bot, e.g. "<app-slug>[bot]"           (required
 #   DEPLOY_GIT_EMAIL  "<bot user id>+<app-slug>[bot]@users.noreply.github.com"              unless DRY_RUN)
 #   GITHUB_STEP_SUMMARY  optional; see Output above
-#   GH_TOKEN          token for infrastructure-live (git fetch/push through gh's credential
+#   GH_TOKEN          token for INFRA_REPO (git fetch/push through gh's credential
 #                     helper, PR list/create/edit/close): the CI App token
 #   SERVICE_GH_TOKEN  token deployed-sha.sh uses to read the service's commits (default GH_TOKEN)
-#   INFRA_REPO        default PlantechHubDev/infrastructure-live
 #   DRY_RUN=1         print the branch, the file diff, the body and the PRs it would close; push,
 #                     create, edit and close nothing (the working tree change is reverted)
 # AWS (deployed-sha.sh, and --base-digest for a tag pin): read-only, the caller's credentials.
@@ -57,7 +64,6 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ORG=PlantechHubDev
-REPO=${INFRA_REPO:-$ORG/infrastructure-live}
 NOT_FOUND="simulation run: not found"
 
 usage() {
@@ -92,11 +98,28 @@ else
     || usage "SERVICE_REPO must be a checkout of $ORG/$svc (got '${SERVICE_REPO:-}')"
 fi
 [[ $svc =~ ^[a-z0-9][a-z0-9-]*$ ]] || usage "bad service name '$svc'"
-UNIT=plantechhub/us-east-1/prod/$svc/terragrunt.hcl
+# relpath <name> <value>: a non-empty relative path (or path pattern) with no "..". Backslashes
+# are dropped first, so an escaped \.\. in a pattern counts as "..".
+relpath() {
+  local v=${2//\\/}
+  [ -n "$2" ] || usage "$1 is not set: pass the caller's input"
+  [[ $v != /* && $v != ^/* ]] || usage "$1 must be a relative path (got '$2')"
+  [[ $v != *..* ]] || usage "$1 must not contain '..' (got '$2')"
+}
+if $pins_mode; then
+  relpath PROD_UNITS_PATTERN "${PROD_UNITS_PATTERN:-}"
+else
+  relpath PROD_UNIT "${PROD_UNIT:-}"
+  UNIT=$PROD_UNIT
+fi
+if ! $pins_mode && ! $base_mode; then
+  [[ ${INFRA_REPO:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || usage "INFRA_REPO must be <owner>/<name> of the infrastructure repo (got '${INFRA_REPO:-}')"
+  REPO=$INFRA_REPO
+fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-# parse_pin <file> [label]: find (messages name <label>, default the unit path) the one `image =` line and split it. Sets PIN_NO (line number), PIN_PRE
+# parse_pin <file> [label]: find (messages name <label>, default PROD_UNIT) the one `image =` line and split it. Sets PIN_NO (line number), PIN_PRE
 # (up to the opening quote), PIN_VAL, PIN_POST (closing quote on), PIN_IMAGE (<registry>/<service>),
 # and PIN_TAG or PIN_DIGEST. Exits 2 when there is not exactly one such line or it does not parse.
 parse_pin() {
@@ -117,8 +140,8 @@ parse_pin() {
 Gn fetch -q origin master 2>"$tmp/err" || die "cannot fetch origin master: $(head -n 1 "$tmp/err")"
 
 if $pins_mode; then
-  units=$(git ls-tree -r --name-only origin/master -- plantechhub | grep -E "^plantechhub/[^/]+/prod/$svc/terragrunt\.hcl\$")
-  [ -n "$units" ] || die2 "no prod unit plantechhub/<region>/prod/$svc/terragrunt.hcl on origin master"
+  units=$(git ls-tree -r --name-only origin/master | grep -E -- "$PROD_UNITS_PATTERN")
+  [ -n "$units" ] || die2 "no prod unit of $svc on origin master matches PROD_UNITS_PATTERN '$PROD_UNITS_PATTERN'"
   while IFS= read -r u; do
     # parse_pin exits on a bad unit; the subshell turns that into "unparseable" (fail closed).
     pin=$(git show "origin/master:$u" > "$tmp/u.hcl" 2>/dev/null &&
@@ -144,7 +167,7 @@ TITLE="deploy($svc): $sha7"
 new_val=$PIN_IMAGE@$digest
 if [ "$PIN_VAL" = "$new_val" ]; then
   echo "open-deploy-pr: origin master already pinned to $new_val; nothing to deploy" >&2
-  summary "$svc $sha7: infrastructure-live master is already pinned to $digest; no deploy PR."
+  summary "$svc $sha7: $REPO master is already pinned to $digest; no deploy PR."
   exit 0
 fi
 if [ -n "$PIN_DIGEST" ]; then
@@ -218,7 +241,7 @@ cat "$tmp/unit.hcl" > "$UNIT"
 changed=true
 git diff --quiet -- "$UNIT" && changed=false
 
-# Only PRs whose head branch lives in infrastructure-live itself; a fork's PR is never ours.
+# Only PRs whose head branch lives in INFRA_REPO itself; a fork's PR is never ours.
 open=$(gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,url,isCrossRepository,headRepositoryOwner) || die "cannot list open PRs in $REPO"
 open=$(jq --arg o "${REPO%%/*}" '[.[] | select((.isCrossRepository // false) == false and ((.headRepositoryOwner.login // $o) == $o))]' <<<"$open") || die "cannot read the open PR list"
 own=$(jq -r --arg b "$BR" '[.[] | select(.headRefName == $b)][0] | if . then "\(.number) \(.url)" else empty end' <<<"$open") || die "cannot read the open PR list"

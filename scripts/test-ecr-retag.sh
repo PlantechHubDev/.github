@@ -10,7 +10,7 @@ export AWS_LOG=$T/aws.log
 A=sha256:$(printf 'a%.0s' $(seq 64))
 export FAKE_SRC_DIGEST=$A
 unset FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_AWS_DENIED FAKE_TAG_DIGEST GITHUB_OUTPUT
-SVC=orchestration-service
+SVC=example-service
 status=0
 
 pass() { echo "PASS $1"; }
@@ -60,8 +60,8 @@ empty "usage: no aws call" "$AWS_LOG"
 # as `open-deploy-pr.sh --pins` prints them.
 MERGE=abc1234$(printf '0%.0s' $(seq 33))
 export GITHUB_OUTPUT=$T/output
-EAST=plantechhub/us-east-1/prod/$SVC/terragrunt.hcl
-WEST=plantechhub/us-west-2/prod/$SVC/terragrunt.hcl
+EAST=live/region-a/prod/$SVC/terragrunt.hcl
+WEST=live/region-b/prod/$SVC/terragrunt.hcl
 # rel <name> <want-exit> <pins> <args...>
 rel() {
   local name=$1 want=$2 pins=$3; shift 3
@@ -83,11 +83,11 @@ logs "east master pin: held-by names the unit in GITHUB_OUTPUT" "$GITHUB_OUTPUT"
 
 FAKE_TAG_DIGEST=$A rel "DR master pin: exits 0" 0 "$EAST digest"$'\n'"$WEST tag:master"$'\n' $SVC "$MERGE"
 nologs "DR master pin: :master not moved (no put-image)" "$AWS_LOG" "put-image"
-has  "DR master pin: warning names the us-west-2 unit" "$out" "::warning::"
+has  "DR master pin: warning names the region-b unit" "$out" "::warning::"
 has  "DR master pin: names $WEST" "$out" "$WEST"
 hasnt "DR master pin: does not blame the digest-pinned unit" "$out" "$EAST"
 logs "DR master pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "DR master pin: held-by names only the us-west-2 unit" "$GITHUB_OUTPUT" "held-by=$WEST"
+logs "DR master pin: held-by names only the region-b unit" "$GITHUB_OUTPUT" "held-by=$WEST"
 
 FAKE_TAG_DIGEST=$A rel "DR unparseable: exits 0" 0 "$EAST digest"$'\n'"$WEST unparseable"$'\n' $SVC "$MERGE"
 nologs "DR unparseable: no retag (fails closed)" "$AWS_LOG" "put-image"

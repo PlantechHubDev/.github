@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Tests open-deploy-pr.sh (pin the released digest in an infrastructure-live branch and open the
+# Tests open-deploy-pr.sh (pin the released digest in an infrastructure repo branch and open the
 # deploy PR) and sim-run-url.sh, with the fake gh and aws in scripts/fixtures/deploy-pr/bin first
-# on PATH. infrastructure-live is a local bare "origin" plus a clone per case, and the service is a
+# on PATH. The infrastructure repo is a local bare "origin" plus a clone per case, and the service is a
 # local repo with real merge commits, so nothing touches GitHub or AWS.
 # Usage: bash scripts/test-open-deploy-pr.sh   (exit 0 when every case passes)
 set -uo pipefail
@@ -12,16 +12,19 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # An empty global git config, so the developer's signing or hooks never reach these repos.
 : > "$T/gitconfig"; export GIT_CONFIG_GLOBAL=$T/gitconfig GIT_CONFIG_NOSYSTEM=1
 export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log GH_BODY=$T/body.md GITHUB_STEP_SUMMARY=$T/summary.md
-unset FAKE_OPEN_PRS FAKE_GH_CREATE_EXIT FAKE_GH_CLOSE_EXIT FAKE_RUNS FAKE_RUNS_EXIT FAKE_TAG_DIGEST FAKE_AWS_DENIED BASE_DIGEST DRY_RUN SERVICE_GH_TOKEN INFRA_REPO HELD_BY
+unset FAKE_OPEN_PRS FAKE_GH_CREATE_EXIT FAKE_GH_CLOSE_EXIT FAKE_RUNS FAKE_RUNS_EXIT FAKE_TAG_DIGEST FAKE_AWS_DENIED BASE_DIGEST DRY_RUN SERVICE_GH_TOKEN HELD_BY
 # release-image.sh's outputs, passed by java-service-release.yml: did :master move, and if not, which units held it.
 export RETAGGED=true
 
-SVC=orchestration-service
-UNIT=plantechhub/us-east-1/prod/$SVC/terragrunt.hcl
+SVC=example-service
+# The caller's inputs (java-service-release.yml prod-unit, prod-units-pattern, infra-repo), with a
+# placeholder layout: live/<region>/prod/<service>/terragrunt.hcl.
+UNIT=live/region-a/prod/$SVC/terragrunt.hcl
+export PROD_UNIT=$UNIT PROD_UNITS_PATTERN="^live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" INFRA_REPO=PlantechHubDev/infra-example
 A=sha256:$(printf 'a%.0s' $(seq 64))          # the released (queue) image
 C=sha256:$(printf 'c%.0s' $(seq 64))          # the digest prod is pinned to now
 SIM=https://github.com/PlantechHubDev/$SVC/actions/runs/42
-NEW_URL=https://github.com/PlantechHubDev/infrastructure-live/pull/77
+NEW_URL=https://github.com/PlantechHubDev/infra-example/pull/77
 export FAKE_NEW_PR_URL=$NEW_URL DEPLOY_GIT_NAME='pth-ci[bot]' DEPLOY_GIT_EMAIL='1+pth-ci[bot]@users.noreply.github.com'
 G() { git -c commit.gpgsign=false -c user.name=t -c user.email=t@example.invalid "$@"; }
 
@@ -47,16 +50,16 @@ status=0
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1: $2"; status=1; }
 
-# setup <fixture>: a fresh infrastructure-live origin whose master holds the fixture as the unit
+# setup <fixture>: a fresh infrastructure repo origin whose master holds the fixture as the unit
 # (plus another unit), and a clone of it at $W.
 n=0
 setup() {
   n=$((n + 1)); O=$T/origin-$n.git W=$T/work-$n
   local seed=$T/seed-$n
   G init -q -b master "$seed"
-  mkdir -p "$seed/$(dirname "$UNIT")" "$seed/plantechhub/us-east-1/prod/calc-service"
+  mkdir -p "$seed/$(dirname "$UNIT")" "$seed/live/region-a/prod/other-service"
   cp "$FIX/$1" "$seed/$UNIT"
-  cp "$FIX/terragrunt-master.hcl" "$seed/plantechhub/us-east-1/prod/calc-service/terragrunt.hcl"
+  cp "$FIX/terragrunt-master.hcl" "$seed/live/region-a/prod/other-service/terragrunt.hcl"
   G -C "$seed" add -A && G -C "$seed" commit -q -m "chore: seed"
   G clone -q --bare "$seed" "$O"
   G clone -q "$O" "$W"
@@ -92,17 +95,17 @@ no_branch() { if git -C "$O" rev-parse -q --verify "refs/heads/$BR" >/dev/null; 
 
 # --- :master form, rollback digest from BASE_DIGEST (resolved before the retag)
 setup terragrunt-master.hcl
-RETAGGED=false HELD_BY="$UNIT plantechhub/us-west-2/prod/$SVC/terragrunt.hcl" BASE_DIGEST=$C run "master form: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
+RETAGGED=false HELD_BY="$UNIT live/region-b/prod/$SVC/terragrunt.hcl" BASE_DIGEST=$C run "master form: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
 golden "master form, not retagged: golden PR body (says :master was not moved, names the units)" body-not-retagged.md
 if diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl" >/dev/null; then pass "master form: unit pinned to the digest, other lines unchanged"; else fail "master form: unit pinned" "$(diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl")"; fi
 if diff <(remote_file master) "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: origin master untouched"; else fail "master form: origin master untouched" "master changed"; fi
-if diff <(git -C "$O" show "$BR:plantechhub/us-east-1/prod/calc-service/terragrunt.hcl") "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: other unit untouched"; else fail "master form: other unit untouched" "calc-service changed"; fi
+if diff <(git -C "$O" show "$BR:live/region-a/prod/other-service/terragrunt.hcl") "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: other unit untouched"; else fail "master form: other unit untouched" "other-service changed"; fi
 is  "master form: one commit on the branch" "$(git -C "$O" rev-list --count "master..$BR")" 1
 is  "master form: commit subject" "$(git -C "$O" log -1 --format=%s "$BR")" "deploy($SVC): pin $S7"
 is  "master form: commit body is empty (no attribution)" "$(git -C "$O" log -1 --format=%b "$BR")" ""
 is  "master form: commit author is the App bot" "$(git -C "$O" log -1 --format='%an <%ae>' "$BR")" "pth-ci[bot] <1+pth-ci[bot]@users.noreply.github.com>"
 is  "master form: committer is the App bot" "$(git -C "$O" log -1 --format='%cn' "$BR")" "pth-ci[bot]"
-logs "master form: PR created into master on the deploy branch" "$GH_LOG" "pr create -R PlantechHubDev/infrastructure-live --base master --head $BR --title deploy($SVC): $S7"
+logs "master form: PR created into master on the deploy branch" "$GH_LOG" "pr create -R PlantechHubDev/infra-example --base master --head $BR --title deploy($SVC): $S7"
 is  "master form: stdout is only the PR URL" "$so" "$NEW_URL"
 logs "master form: step summary names the PR" "$GITHUB_STEP_SUMMARY" "$NEW_URL"
 has "body: rollback digest is the old pin" "$(body)" "Rollback digest: $C"
@@ -129,7 +132,7 @@ G clone -q "$O" "$T/work-rerun"; W=$T/work-rerun
 FAKE_OPEN_PRS="[{\"number\":8,\"headRefName\":\"$BR\",\"url\":\"$NEW_URL\"}]" BASE_DIGEST=$C run "re-run: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
 is  "re-run: still one commit on the branch" "$(git -C "$O" rev-list --count "master..$BR")" 1
 nologs "re-run: no second PR" "$GH_LOG" "pr create"
-logs "re-run: existing PR body updated" "$GH_LOG" "pr edit 8 -R PlantechHubDev/infrastructure-live"
+logs "re-run: existing PR body updated" "$GH_LOG" "pr edit 8 -R PlantechHubDev/infra-example"
 nologs "re-run: own PR not closed" "$GH_LOG" "pr close 8"
 has "re-run: body written" "$(body)" "Rollback digest: $C"
 is  "re-run: stdout is the existing PR URL" "$so" "$NEW_URL"
@@ -151,12 +154,12 @@ hasnt "digest form, retagged: does not say :master was not moved" "$(body)" "not
 
 # --- older deploy PRs of this service are closed, others untouched
 setup terragrunt-digest.hcl
-FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5"},
- {"number":6,"headRefName":"deploy/calc-service-abc1234","url":"u6"},
- {"number":7,"headRefName":"deploy/orchestration-service-extra-abc1234","url":"u7"},
- {"number":9,"headRefName":"feature/deploy/orchestration-service-abc1234","url":"u9"}]' \
+FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/example-service-abc1234","url":"u5"},
+ {"number":6,"headRefName":"deploy/other-service-abc1234","url":"u6"},
+ {"number":7,"headRefName":"deploy/example-service-extra-abc1234","url":"u7"},
+ {"number":9,"headRefName":"feature/deploy/example-service-abc1234","url":"u9"}]' \
   run "supersede: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
-logs "supersede: older PR closed with a comment naming the new PR" "$GH_LOG" "pr close 5 -R PlantechHubDev/infrastructure-live --comment Superseded by $NEW_URL"
+logs "supersede: older PR closed with a comment naming the new PR" "$GH_LOG" "pr close 5 -R PlantechHubDev/infra-example --comment Superseded by $NEW_URL"
 nologs "supersede: other service's PR untouched" "$GH_LOG" "pr close 6"
 nologs "supersede: longer service name with the same prefix untouched" "$GH_LOG" "pr close 7"
 nologs "supersede: non-deploy branch untouched" "$GH_LOG" "pr close 9"
@@ -164,9 +167,9 @@ has "supersede: body keeps the rollback digest" "$(body)" "Rollback digest: $C"
 
 # --- PRs from forks are never closed or reused, even on a deploy/ branch name
 setup terragrunt-digest.hcl
-FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"}},
+FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/example-service-abc1234","url":"u5","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"}},
  {"number":8,"headRefName":"'"$BR"'","url":"u8","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"}},
- {"number":4,"headRefName":"deploy/orchestration-service-def5678","url":"u4","isCrossRepository":false,"headRepositoryOwner":{"login":"PlantechHubDev"}}]' \
+ {"number":4,"headRefName":"deploy/example-service-def5678","url":"u4","isCrossRepository":false,"headRepositoryOwner":{"login":"PlantechHubDev"}}]' \
   run "fork: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
 nologs "fork: fork PR on an older deploy branch not closed" "$GH_LOG" "pr close 5"
 nologs "fork: fork PR on this branch name not reused" "$GH_LOG" "pr edit 8"
@@ -175,7 +178,7 @@ logs "fork: same-repo older deploy PR still closed" "$GH_LOG" "pr close 4 "
 
 # --- closing an older PR fails: exit 1, the new PR is open and the summary says which failed
 setup terragrunt-digest.hcl
-FAKE_GH_CLOSE_EXIT=1 FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5"}]' \
+FAKE_GH_CLOSE_EXIT=1 FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/example-service-abc1234","url":"u5"}]' \
   run "close failure: exits 1" 1 $SVC "$A" "$MERGE" "$SIM"
 is  "close failure: stdout still the new PR URL" "$so" "$NEW_URL"
 logs "close failure: summary names the open PR" "$GITHUB_STEP_SUMMARY" "$NEW_URL"
@@ -213,7 +216,7 @@ nologs "push rejected: no PR created" "$GH_LOG" "pr create"
 
 # --- DRY_RUN=1: prints branch, diff and body; pushes, creates and closes nothing
 setup terragrunt-digest.hcl
-FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5"}]' \
+FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/example-service-abc1234","url":"u5"}]' \
   DRY_RUN=1 DEPLOY_GIT_NAME='' run "dry run: exits 0 (no bot identity needed)" 0 $SVC "$A" "$MERGE" "$SIM"
 has "dry run: prints the branch" "$out" "$BR"
 has "dry run: prints the diff" "$out" "+    image          = \"registry.example.test/$SVC@$A\""
@@ -253,6 +256,25 @@ SERVICE_REPO=$T/nowhere BASE_DIGEST=$C run "usage: SERVICE_REPO not a repo" 64 $
 nologs "usage: no PR created" "$GH_LOG" "pr create"
 no_branch "usage: nothing pushed"
 
+# --- the caller's inputs: required, relative, no ..; usage (64) before any git or gh call
+setup terragrunt-digest.hcl
+PROD_UNIT='' run "inputs: PROD_UNIT unset exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+has "inputs: says PROD_UNIT is needed" "$out" "PROD_UNIT"
+PROD_UNIT=/$UNIT run "inputs: absolute PROD_UNIT exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+PROD_UNIT=live/region-a/../region-b/prod/$SVC/terragrunt.hcl run "inputs: PROD_UNIT with .. exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+INFRA_REPO='' run "inputs: INFRA_REPO unset exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+has "inputs: says INFRA_REPO is needed" "$out" "INFRA_REPO"
+INFRA_REPO=infra-example run "inputs: INFRA_REPO without owner exits 64" 64 $SVC "$A" "$MERGE" "$SIM"
+nologs "inputs: no PR created" "$GH_LOG" "pr create"
+no_branch "inputs: nothing pushed"
+PROD_UNIT='' run "inputs: --base-digest needs PROD_UNIT" 64 --base-digest $SVC
+PROD_UNITS_PATTERN='' INFRA_REPO='' run "inputs: --base-digest needs neither the pattern nor INFRA_REPO" 0 --base-digest $SVC
+PROD_UNITS_PATTERN='' run "inputs: --pins needs PROD_UNITS_PATTERN" 64 --pins $SVC
+has "inputs: says PROD_UNITS_PATTERN is needed" "$out" "PROD_UNITS_PATTERN"
+PROD_UNITS_PATTERN="^live/\.\./prod/$SVC/terragrunt\\.hcl\$" run "inputs: pattern with .. exits 64" 64 --pins $SVC
+PROD_UNITS_PATTERN="^/live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" run "inputs: absolute pattern exits 64" 64 --pins $SVC
+PROD_UNIT='' INFRA_REPO='' run "inputs: --pins needs neither PROD_UNIT nor INFRA_REPO" 0 --pins $SVC
+
 # --- --base-digest: the digest prod is pinned to on origin master (before the retag)
 setup terragrunt-digest.hcl
 run "base: digest form exits 0" 0 --base-digest $SVC
@@ -269,35 +291,36 @@ run "base: no image line exits 2" 2 --base-digest $SVC
 run "base: usage" 64 --base-digest
 
 # --- --pins: every prod unit of the service, in every region, from origin master
-WEST=plantechhub/us-west-2/prod/$SVC/terragrunt.hcl
+WEST=live/region-b/prod/$SVC/terragrunt.hcl
 # add_unit <path> <fixture>: commit <fixture> at <path> on origin master (through $W).
 add_unit() { mkdir -p "$W/$(dirname "$1")"; cp "$FIX/$2" "$W/$1"; G -C "$W" add -A; G -C "$W" commit -q -m "chore: add $1"; G -C "$W" push -q origin master; }
 setup terragrunt-digest.hcl
 add_unit "$WEST" terragrunt-dr-master.hcl
-add_unit plantechhub/us-west-2/prod/calc-service/terragrunt.hcl terragrunt-dr-master.hcl
-add_unit "plantechhub/us-east-1/staging/$SVC/terragrunt.hcl" terragrunt-master.hcl
-add_unit "plantechhub/us-east-1/prod/$SVC-extra/terragrunt.hcl" terragrunt-master.hcl
+add_unit live/region-b/prod/other-service/terragrunt.hcl terragrunt-dr-master.hcl
+add_unit "live/region-a/staging/$SVC/terragrunt.hcl" terragrunt-master.hcl
+add_unit "live/region-a/prod/$SVC-extra/terragrunt.hcl" terragrunt-master.hcl
+add_unit "other/region-a/prod/$SVC/terragrunt.hcl" terragrunt-master.hcl
 run "pins: exits 0" 0 --pins $SVC
-is "pins: one line per prod unit, all regions, with its pin" "$so" "plantechhub/us-east-1/prod/$SVC/terragrunt.hcl digest
+is "pins: one line per prod unit, all regions, with its pin" "$so" "$UNIT digest
 $WEST tag:master"
 nologs "pins: no aws call" "$AWS_LOG" "ecr"
 # --pins | release-image.sh: the DR unit's :master pin stops the retag.
 : > "$AWS_LOG"
 pipe=$( (cd "$W" && bash "$HERE/open-deploy-pr.sh" --pins $SVC) | FAKE_TAG_DIGEST=$A FAKE_SRC_DIGEST=$A GITHUB_OUTPUT=$T/out bash "$HERE/release-image.sh" $SVC "$MERGE" 2>&1)
-nologs "pins | release-image: no put-image while us-west-2 pins :master" "$AWS_LOG" "put-image"
-has "pins | release-image: warning names the us-west-2 unit" "$pipe" "$WEST"
+nologs "pins | release-image: no put-image while region-b pins :master" "$AWS_LOG" "put-image"
+has "pins | release-image: warning names the region-b unit" "$pipe" "$WEST"
 setup terragrunt-digest.hcl
 add_unit "$WEST" terragrunt-digest.hcl
 run "pins: all digests exits 0" 0 --pins $SVC
-is "pins: all digests" "$so" "plantechhub/us-east-1/prod/$SVC/terragrunt.hcl digest
+is "pins: all digests" "$so" "$UNIT digest
 $WEST digest"
 setup terragrunt-digest.hcl
 add_unit "$WEST" terragrunt-noimage.hcl
 run "pins: unparseable unit exits 0" 0 --pins $SVC
-is "pins: unparseable unit reported, not dropped" "$so" "plantechhub/us-east-1/prod/$SVC/terragrunt.hcl digest
+is "pins: unparseable unit reported, not dropped" "$so" "$UNIT digest
 $WEST unparseable"
 setup terragrunt-digest.hcl
-G -C "$W" rm -q -r plantechhub; G -C "$W" commit -q -m "chore: drop"; G -C "$W" push -q origin master
+G -C "$W" rm -q -r live; G -C "$W" commit -q -m "chore: drop"; G -C "$W" push -q origin master
 run "pins: no prod unit exits 2" 2 --pins $SVC
 run "pins: usage" 64 --pins
 

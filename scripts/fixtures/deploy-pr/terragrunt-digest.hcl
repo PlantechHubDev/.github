@@ -1,4 +1,4 @@
-# Prod unit for orchestration-service (fixture for scripts/test-open-deploy-pr.sh).
+# Prod unit for example-service (fixture for scripts/test-open-deploy-pr.sh).
 include "root" {
   path = find_in_parent_folders("root.hcl")
 }
@@ -8,9 +8,9 @@ terraform {
 }
 
 inputs = {
-  service_name   = "orchestration-service"
-  # image = "registry.example.test/orchestration-service:old"
-    image          = "registry.example.test/orchestration-service@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"   # pinned by the release workflow
+  service_name   = "example-service"
+  # image = "registry.example.test/example-service:old"
+    image          = "registry.example.test/example-service@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"   # pinned by the release workflow
   sidecar_image  = "registry.example.test/log-router:stable"
   container_port = 8080
 }
