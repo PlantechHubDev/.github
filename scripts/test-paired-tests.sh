@@ -116,6 +116,15 @@ run "queue: master ref"              0 bash "$QPR" "gh-readonly-queue/master/pr-
 is  "queue: prints the number" "$out" "123"
 run "queue: main ref"                0 bash "$QPR" "gh-readonly-queue/main/pr-7-$A"
 is  "queue: prints 7" "$out" "7"
+# GitHub's merge_group payload gives head_ref as the full ref.
+run "queue: full refs/heads/ ref"     0 bash "$QPR" "refs/heads/gh-readonly-queue/master/pr-123-$A"
+is  "queue: full ref prints the number" "$out" "123"
+run "queue: full ref, slash in base"  0 bash "$QPR" "refs/heads/gh-readonly-queue/release/v2/pr-9-$A"
+is  "queue: slash in base prints 9" "$out" "9"
+run "queue: other refs/ prefix rejected" 1 bash "$QPR" "refs/tags/gh-readonly-queue/master/pr-123-$A"
+run "queue: doubled prefix rejected"  1 bash "$QPR" "refs/heads/refs/heads/gh-readonly-queue/master/pr-123-$A"
+run "queue: bad base chars rejected"  1 bash "$QPR" "refs/heads/gh-readonly-queue/ma ster/pr-123-$A"
+run "queue: .. in base rejected"     1 bash "$QPR" "refs/heads/gh-readonly-queue/../x/pr-123-$A"
 run "queue: plain branch rejected"   1 bash "$QPR" "feat/12-pr-3-x"
 has "queue: says not a queue ref" "not a merge-queue ref"
 run "queue: short sha rejected"      1 bash "$QPR" "gh-readonly-queue/master/pr-12-short"
@@ -123,7 +132,7 @@ has "queue: names the bad ref" "gh-readonly-queue/master/pr-12-short"
 run "queue: empty ref rejected"      1 bash "$QPR" ""
 run "queue: trailing junk rejected"  1 bash "$QPR" "gh-readonly-queue/master/pr-123-${A}x"
 # The queue's number feeds the check, which reads the PR from the API.
-run "queue: check reads the PR by number" 0 bash "$CHECK" $R "$(bash "$QPR" "gh-readonly-queue/master/pr-1-$A")"
+run "queue: check reads the PR by number" 0 bash "$CHECK" $R "$(bash "$QPR" "refs/heads/gh-readonly-queue/master/pr-1-$A")"
 logs "queue: gh read pulls/1" "$GH_LOG" "pulls/1"
 
 # --- rerun-paired-tests.sh

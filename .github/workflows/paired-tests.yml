@@ -20,8 +20,9 @@
 # sha could otherwise satisfy the PR's required ci-ok check without the paired-tests result.
 #
 # Merge queue: the caller's ci.yml also triggers on `merge_group` (types: [checks_requested]).
-# There the PR number comes from the queue branch name (github.event.merge_group.head_ref,
-# gh-readonly-queue/<branch>/pr-<n>-<sha>) through scripts/queue-pr-number.sh, and the check
+# There the PR number comes from the queue branch name (github.event.merge_group.head_ref, the
+# full ref refs/heads/gh-readonly-queue/<branch>/pr-<n>-<sha>; the short form without refs/heads/
+# is accepted too) through scripts/queue-pr-number.sh, and the check
 # reads that PR from the API as usual. The caller's concurrency group SHOULD be
 # ${{ github.event.pull_request.number || github.event.merge_group.head_ref }}.
 #

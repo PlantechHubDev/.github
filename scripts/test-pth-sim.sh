@@ -62,7 +62,16 @@ has "usage: DEV unset says so" "DEV is not set"
 
 MG_HEAD_REF="" run "usage: MG_HEAD_REF unset exits 64" 64 $SVC "$Q" "$QSHA"
 has "usage: MG_HEAD_REF unset says so" "MG_HEAD_REF"
-MG_HEAD_REF=$QREF run "usage: MG_HEAD_REF without refs/heads/ exits 64" 64 $SVC "$Q" "$QSHA"
+MG_HEAD_REF=refs/heads/feat/12-x run "usage: MG_HEAD_REF not a queue branch exits 64" 64 $SVC "$Q" "$QSHA"
+has "usage: MG_HEAD_REF not a queue branch says so" "gh-readonly-queue"
+empty "usage: MG_HEAD_REF not a queue branch, no gh call" "$GH_LOG"
+MG_HEAD_REF="refs/heads/gh-readonly-queue/../../../x/pr-12-$QSHA" run "usage: MG_HEAD_REF with .. exits 64" 64 $SVC "$Q" "$QSHA"
+empty "usage: MG_HEAD_REF with .., no gh call" "$GH_LOG"
+MG_HEAD_REF="refs/heads/gh-readonly-queue/master/pr-12-${QSHA}?x=1" run "usage: MG_HEAD_REF with query junk exits 64" 64 $SVC "$Q" "$QSHA"
+MG_HEAD_REF=refs/tags/$QREF run "usage: MG_HEAD_REF under refs/tags exits 64" 64 $SVC "$Q" "$QSHA"
+# The short form (no refs/heads/) is accepted too, and looks up the same branch.
+MG_HEAD_REF=$QREF run "short MG_HEAD_REF accepted" 0 $SVC "$Q" "$QSHA"
+if [ "$(head -n 1 "$GH_LOG")" = "api repos/PlantechHubDev/$SVC/git/ref/heads/$QREF" ]; then pass "short MG_HEAD_REF: same branch lookup"; else fail "short MG_HEAD_REF: same branch lookup" "$(cat "$GH_LOG")"; fi
 GITHUB_REPOSITORY="" run "usage: GITHUB_REPOSITORY unset exits 64" 64 $SVC "$Q" "$QSHA"
 
 # --- the queue entry is gone (5): checked first, before SSO, pt-ref, the lock or npm
