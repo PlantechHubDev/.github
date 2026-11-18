@@ -22,6 +22,17 @@
 # Exit codes: 0 pass, 1 simulation failed, 2 resolver/setup error, 3 more than one paired
 # platform-tests change (split the release), 4 AWS SSO expired (run aws sso login), 64 usage.
 #
+# Keeping the Mac to queue runs at a release tag: the job runs only on merge_group (job-level
+# if, so a pull_request or push run never dispatches to the Mac), and its first step, before any
+# checkout, fails unless checks-ref is a release tag (vX.Y.Z), so the Mac only runs scripts a
+# tag published. The org runner group that holds the pth-test runner is restricted to this
+# workflow (PlantechHubDev/.github/.github/workflows/pth-sim.yml) at a tag, so no other workflow,
+# and no branch of this one, can reach the runner (configured in the org settings, outside this
+# repo).
+#
+# Timeouts: timeout-minutes is 90. The merge queue's check timeout is 180 minutes, so pth-sim
+# (90) plus the image job before it (about 45) stays under it.
+#
 # The runner's environment MUST set DEV (the workspace dev dir holding engineering-handbook and
 # platform-tests) and MAY set PTH_AWS_PROFILE (default pth-admin-prod). GitHub reads (pt-ref,
 # commit lookup) use the developer's gh login on the Mac; AWS reads use the SSO profile. No
@@ -51,14 +62,27 @@ permissions:
 jobs:
   pth-sim:
     name: pth-sim
+    # Never dispatched to the Mac outside the merge queue.
+    if: github.event_name == 'merge_group'
     runs-on: [self-hosted, pth-test]
-    timeout-minutes: 120
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
       # One pth-test stack per session (decision 0106); each run attempt is its own session.
       PTH_STACK_SESSION: gh-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      # Before any checkout: the Mac runs only scripts at a release tag.
+      - name: Require checks-ref to be a release tag
+        shell: bash
+        env:
+          CHECKS_REF: ${{ inputs.checks-ref }}
+        run: |
+          if ! [[ $CHECKS_REF =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::checks-ref must be a release tag vX.Y.Z (got '$CHECKS_REF'): the pth-test runner runs only tagged scripts"
+            exit 1
+          fi
+
       - name: Check out the shared scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -147,4 +147,114 @@ expect "readme fixture: no example" 1 readme "$FIX/readme-missing.md" "no trunk 
 for f in "$ROOT"/.github/workflows/*.yml; do expect "repo workflow: $(basename "$f")" 0 workflow "$f"; done
 expect "repo README trunk example" 0 readme "$ROOT/README.md"
 
+# --- pth-sim.yml keeps the developer's Mac runner to merge-queue runs at a release tag.
+# pthsim <file> <check|step>: "check" exits 0 when the pth-sim job has the job-level
+# `if: github.event_name == 'merge_group'`, timeout-minutes 90, and a first step (before any
+# checkout) that takes checks-ref through env CHECKS_REF; else 1 with a message. "step" prints
+# that first step's run script, so the test can run it.
+pthsim() {
+  python3 -I - "$1" "$2" <<'PY'
+import re, sys
+
+path, mode = sys.argv[1], sys.argv[2]
+raw = open(path, encoding="utf-8").read().splitlines()
+
+
+def ind(l):
+    return len(l) - len(l.lstrip(" "))
+
+
+def fail(msg):
+    print("%s: %s" % (path.rsplit("/", 1)[-1], msg))
+    raise SystemExit(1)
+
+
+# The pth-sim job's lines (under top-level jobs:).
+start = next((i for i, l in enumerate(raw) if re.match(r"^  pth-sim:\s*$", l)), None)
+if start is None:
+    fail("no job pth-sim")
+job = []
+for l in raw[start + 1:]:
+    if l.strip() and ind(l) <= 2:
+        break
+    job.append(l)
+keys = {}
+for l in job:
+    m = re.match(r"^    ([a-z-]+):\s*(.*?)\s*$", l)
+    if m:
+        keys[m.group(1)] = m.group(2)
+# Steps: the items at the first "- " indentation under steps:.
+si = next((i for i, l in enumerate(job) if re.match(r"^    steps:\s*$", l)), None)
+if si is None:
+    fail("pth-sim has no steps")
+steps, cur = [], None
+for l in job[si + 1:]:
+    if re.match(r"^      - ", l):
+        cur = [l]
+        steps.append(cur)
+    elif cur is not None and (not l.strip() or ind(l) > 6):
+        cur.append(l)
+if not steps:
+    fail("pth-sim has no steps")
+first = steps[0]
+text = "\n".join(first)
+run, inrun = [], False
+for l in first:
+    if inrun:
+        if l.strip() and ind(l) <= 8:
+            inrun = False
+        else:
+            run.append(l[10:])
+            continue
+    if re.match(r"^        run:\s*\|\s*$", l):
+        inrun = True
+
+if mode == "step":
+    print("\n".join(run))
+    raise SystemExit(0)
+cond = keys.get("if", "").strip()
+m = re.match(r"^\$\{\{\s*(.*?)\s*\}\}$", cond)
+if m:
+    cond = m.group(1)
+if cond != "github.event_name == 'merge_group'":
+    fail("the pth-sim job needs the job-level if: github.event_name == 'merge_group' (got '%s')" % keys.get("if", ""))
+if keys.get("timeout-minutes") != "90":
+    fail("the pth-sim job needs timeout-minutes: 90 (got '%s')" % keys.get("timeout-minutes", ""))
+if "actions/checkout" in text:
+    fail("the first pth-sim step must check checks-ref before any checkout")
+if not re.search(r"^\s+CHECKS_REF:\s*\$\{\{\s*inputs\.checks-ref\s*\}\}\s*$", text, re.M):
+    fail("the first pth-sim step must take checks-ref through env CHECKS_REF")
+if not run:
+    fail("the first pth-sim step needs a run: | script")
+PY
+}
+expect_pthsim() {
+  local name=$1 want=$2 file=$3 text=${4:-} out code
+  out=$(pthsim "$file" check 2>&1); code=$?
+  if [ "$code" != "$want" ]; then fail "$name" "exit $code want $want; output: $out"; return; fi
+  if [ -n "$text" ] && [[ $out != *"$text"* ]]; then fail "$name" "output lacks '$text': $out"; return; fi
+  pass "$name"
+}
+# tagcheck <name> <want-exit> <checks-ref>: run pth-sim.yml's first step with CHECKS_REF set.
+tagcheck() {
+  local name=$1 want=$2 script out code
+  script=$(pthsim "$ROOT/.github/workflows/pth-sim.yml" step) || { fail "$name" "cannot read the step: $script"; return; }
+  out=$(CHECKS_REF=$3 bash -e -c "$script" 2>&1); code=$?
+  if [ "$code" != "$want" ]; then fail "$name" "exit $code want $want; output: $out"; return; fi
+  if [ "$want" != 0 ] && [[ $out != *"::error::"* ]]; then fail "$name" "no ::error:: in: $out"; return; fi
+  pass "$name"
+}
+expect_pthsim "pth-sim fixture ok" 0 "$FIX/pthsim-good.yml"
+expect_pthsim "pth-sim fixture: no job if" 1 "$FIX/pthsim-bad-no-if.yml" "github.event_name == 'merge_group'"
+expect_pthsim "pth-sim fixture: checkout before the tag check" 1 "$FIX/pthsim-bad-checkout-first.yml" "before any checkout"
+expect_pthsim "pth-sim fixture: timeout not 90" 1 "$FIX/pthsim-bad-timeout.yml" "timeout-minutes: 90"
+expect_pthsim "repo pth-sim.yml: queue-only, tag-checked" 0 "$ROOT/.github/workflows/pth-sim.yml"
+tagcheck "pth-sim tag check: v2.4.0 passes" 0 v2.4.0
+tagcheck "pth-sim tag check: v10.0.12 passes" 0 v10.0.12
+tagcheck "pth-sim tag check: a branch is rejected" 1 master
+tagcheck "pth-sim tag check: a sha is rejected" 1 3d3c42e5aac5ba805825da76410c181273ba90b1
+tagcheck "pth-sim tag check: a pre-release is rejected" 1 v2.4.0-rc.1
+tagcheck "pth-sim tag check: empty is rejected" 1 ""
+tagcheck "pth-sim tag check: a second line is rejected" 1 $'v2.4.0\nmaster'
+
 exit $status
