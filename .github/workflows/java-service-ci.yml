@@ -159,10 +159,11 @@ jobs:
         run: ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" clean build
 
       # Gradle hides test stdout, so a provider build writes its ::notice::/::warning:: lines to
-      # build/reports/pact/*.txt; printing them here turns them into annotations.
+      # build/reports/pact/*.txt; this step prints them as annotations and fails the job when pacts
+      # were fetched but summary.txt does not report that many verified (not continue-on-error).
       - name: Show contract verification summary
         if: always() && inputs.pact-fetch-consumers != ''
-        run: bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact || true
+        run: bash .pth-checks-pact/scripts/pact/show-summary.sh build/reports/pact "$RUNNER_TEMP/pacts"
 
       - name: Upload consumer contracts
         if: always() && inputs.pact-gate-providers != ''

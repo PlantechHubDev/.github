@@ -424,27 +424,56 @@ pull_command_not_found_fails() {
   hasnt "pull_command_not_found_fails: not skipped" "not readable"
   has "pull_command_not_found_fails: error" "::error::"
 }
+# summary_layout <fetched-count> [verified-line...]: $T/sp/<package>/*.json pacts and $T/sum/summary.txt.
+summary_layout() {
+  reset; rm -rf "${T:?}/sp" "${T:?}/sum"; mkdir -p "$T/sp/pacts-consumer-a" "$T/sum"
+  local n=$1 i; shift
+  for ((i = 1; i <= n; i++)); do cp "$FIX/consumer-a-provider-b.json" "$T/sp/pacts-consumer-a/consumer-a-provider-b-$i.json"; done
+  [ $# -eq 0 ] || printf '%s\n' "$@" > "$T/sum/summary.txt"
+}
 show_summary_prints_command_lines() {
-  reset; mkdir -p "$T/sum"
-  printf '::notice::verified 10 active consumer pacts\nplain log line\n' > "$T/sum/summary.txt"
+  summary_layout 1 '::notice::verified 1 active pacts from consumer-a under default' 'plain log line'
   printf '::warning::pending pact failed: consumer-a\n::error::boom\n  ::notice::indented is not a command\n' > "$T/sum/pending-warnings.txt"
   echo '::notice::in a json file' > "$T/sum/ignored.json"
-  run "show_summary_prints_command_lines" 0 bash "$SUMMARY" "$T/sum"
-  has "show_summary_prints_command_lines: notice" "::notice::verified 10 active consumer pacts"
+  run "show_summary_prints_command_lines" 0 bash "$SUMMARY" "$T/sum" "$T/sp"
+  has "show_summary_prints_command_lines: notice" "::notice::verified 1 active pacts from consumer-a under default"
   has "show_summary_prints_command_lines: warning" "::warning::pending pact failed: consumer-a"
   has "show_summary_prints_command_lines: error" "::error::boom"
   hasnt "show_summary_prints_command_lines: non-command line ignored" "plain log line"
   hasnt "show_summary_prints_command_lines: indented ignored" "indented is not"
   hasnt "show_summary_prints_command_lines: only .txt files" "in a json file"
-  hasnt "show_summary_prints_command_lines: no missing-summary notice" "no contract verification summary"
 }
-show_summary_missing_dir_notice() {
-  reset
-  run "show_summary_missing_dir_notice" 0 bash "$SUMMARY" "$T/nope"
-  has "show_summary_missing_dir_notice: notice" "::notice::no contract verification summary found under $T/nope"
-  mkdir -p "$T/emptysum"; printf 'no commands here\n' > "$T/emptysum/a.txt"
-  run "show_summary_no_command_lines_notice" 0 bash "$SUMMARY" "$T/emptysum"
-  has "show_summary_no_command_lines_notice: notice" "::notice::no contract verification summary found under $T/emptysum"
+show_summary_verified_all_passes() {
+  summary_layout 2 '::notice::verified 1 active pacts from consumer-a under default' '::notice::verified 1 active pacts from consumer-a under pr-3'
+  run "show_summary_verified_all_passes" 0 bash "$SUMMARY" "$T/sum" "$T/sp"
+}
+show_summary_missing_summary_fails() {
+  summary_layout 2
+  run "show_summary_missing_summary_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp"
+  has "show_summary_missing_summary_fails: message" "::error::fetched 2 consumer pacts but the build verified 0; the provider's contract test did not run or did not load them"
+  has "show_summary_missing_summary_fails: notice" "::notice::no contract verification summary found under $T/sum"
+}
+show_summary_too_few_verified_fails() {
+  summary_layout 2 '::notice::verified 1 active pacts from consumer-a under default'
+  run "show_summary_too_few_verified_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp"
+  has "show_summary_too_few_verified_fails: message" "::error::fetched 2 consumer pacts but the build verified 1;"
+}
+show_summary_missing_report_dir_fails() {
+  summary_layout 1; rm -rf "${T:?}/sum"
+  run "show_summary_missing_report_dir_fails" 1 bash "$SUMMARY" "$T/sum" "$T/sp"
+  has "show_summary_missing_report_dir_fails: notice" "::notice::no contract verification summary found under $T/sum"
+}
+show_summary_nothing_fetched_is_notice() {
+  summary_layout 0; rm -rf "${T:?}/sum"
+  run "show_summary_nothing_fetched_is_notice" 0 bash "$SUMMARY" "$T/sum" "$T/sp"
+  has "show_summary_nothing_fetched_is_notice: notice" "::notice::no consumer pacts were fetched"
+  run "show_summary_missing_pacts_dir" 0 bash "$SUMMARY" "$T/sum" "$T/nope"
+}
+show_summary_pending_only_is_ok() {
+  summary_layout 0; rm -rf "${T:?}/sum"
+  jq '.consumer.name = "consumer-a.pending"' "$FIX/consumer-a-provider-b.json" > "$T/sp/pacts-consumer-a/consumer-a.pending-provider-b.json"
+  run "show_summary_pending_only_is_ok" 0 bash "$SUMMARY" "$T/sum" "$T/sp"
+  has "show_summary_pending_only_is_ok: nothing fetched" "::notice::no consumer pacts were fetched"
 }
 
 default_branch_uses_event
@@ -500,5 +529,10 @@ gate_null_description_still_gated
 digest_null_description_and_bad_input
 pull_command_not_found_fails
 show_summary_prints_command_lines
-show_summary_missing_dir_notice
+show_summary_verified_all_passes
+show_summary_missing_summary_fails
+show_summary_too_few_verified_fails
+show_summary_missing_report_dir_fails
+show_summary_nothing_fetched_is_notice
+show_summary_pending_only_is_ok
 exit $status
