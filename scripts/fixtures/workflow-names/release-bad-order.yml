@@ -7,8 +7,6 @@ on:
       role-to-assume: {type: string, required: true}
       checks-ref: {type: string, required: true}
       ci-workflow: {type: string, required: true}
-      infra-repo: {type: string, required: true}
-      prod-units-pattern: {type: string, required: true}
       ecs-cluster: {type: string, required: true}
       ecs-service: {type: string, required: true}
       log-group: {type: string, required: true}
@@ -25,10 +23,8 @@ jobs:
       actions: read
       pull-requests: write
     steps:
-      - name: Pins
-        run: bash .pth-checks/scripts/open-deploy-pr.sh --pins x > pins
       - name: Retag
-        run: bash .pth-checks/scripts/release-image.sh x y < pins
+        run: bash .pth-checks/scripts/release-image.sh x y a b
       - name: Gate
         run: bash .pth-checks/scripts/queue-run-green.sh a b c
       - name: Deploy

@@ -25,20 +25,20 @@
 # region: every path in `git ls-tree -r --name-only` that matches the ERE PROD_UNITS_PATTERN.
 # <pin> is "digest", "tag:<name>", or
 # "unparseable" when the unit has not exactly one image line of the form above. It reads git only
-# (no AWS, no push). java-service-release.yml pipes this list into release-image.sh, which fails
-# the release unless every unit pins :master. PROD_UNIT is optional here. Exit 0, or 2 when the
-# service has no prod unit or PROD_UNIT is set and is not one of the matched units.
+# (no AWS). Exit 0, or 2 when the service has no prod unit or PROD_UNIT is not one of the
+# matched units (the deploy PR edits PROD_UNIT).
 #
-# The deploy-PR mode is not called by java-service-release.yml since v2.6.0 (deploys force a new
-# deployment of :master); it is kept for the later immutable-tags work.
+# Not called by java-service-release.yml since v2.6.0, which deploys by retagging :master and
+# forcing a new ECS deployment (its guard reads the running service); kept for the later
+# immutable-tags work.
 #
 # Output: stdout carries only the PR URL (nothing when there is no PR); messages go to stderr.
 # When GITHUB_STEP_SUMMARY is set, a line is added there: the PR, "already pinned", and any older
 # deploy PR that could not be closed.
 #
 # Environment:
-#   PROD_UNIT         path of the unit the deploy PR edits (required, optional with --pins).
-#                     When set, --pins exits 2 unless it is one of the matched units
+#   PROD_UNIT         path of the unit the deploy PR edits (required): the caller's input
+#                     prod-unit. --pins exits 2 unless it is one of the matched units
 #   PROD_UNITS_PATTERN  ERE over `git ls-tree -r --name-only` paths that matches every prod unit
 #                     of the service (required with --pins): the caller's input prod-units-pattern
 #                     PROD_UNIT must be a non-empty relative path with no ".."; the pattern must be
@@ -102,13 +102,11 @@ else
     || usage "SERVICE_REPO must be a checkout of $ORG/$svc (got '${SERVICE_REPO:-}')"
 fi
 [[ $svc =~ ^[a-z0-9][a-z0-9-]*$ ]] || usage "bad service name '$svc'"
-# PROD_UNIT: a non-empty relative path with no ".." (optional with --pins).
-if ! $pins_mode || [ -n "${PROD_UNIT:-}" ]; then
-  [ -n "${PROD_UNIT:-}" ] || usage "PROD_UNIT is not set: pass the caller's input prod-unit"
-  [[ $PROD_UNIT != /* ]] || usage "PROD_UNIT must be a relative path (got '$PROD_UNIT')"
-  [[ $PROD_UNIT != *..* ]] || usage "PROD_UNIT must not contain '..' (got '$PROD_UNIT')"
-fi
-UNIT=${PROD_UNIT:-}
+# PROD_UNIT: a non-empty relative path with no "..".
+[ -n "${PROD_UNIT:-}" ] || usage "PROD_UNIT is not set: pass the caller's input prod-unit"
+[[ $PROD_UNIT != /* ]] || usage "PROD_UNIT must be a relative path (got '$PROD_UNIT')"
+[[ $PROD_UNIT != *..* ]] || usage "PROD_UNIT must not contain '..' (got '$PROD_UNIT')"
+UNIT=$PROD_UNIT
 # PROD_UNITS_PATTERN: a non-empty ERE over relative paths. ".." is allowed (in an ERE it is two
 # any-characters, and the matched git paths never contain "..").
 if $pins_mode; then
@@ -147,7 +145,7 @@ if $pins_mode; then
   [ -n "$units" ] || die2 "no prod unit of $svc on origin master matches PROD_UNITS_PATTERN '$PROD_UNITS_PATTERN'"
   # The deploy PR edits PROD_UNIT, so the :master guard must see it: a pattern that misses it is
   # a caller error, never a shorter list.
-  [ -z "$UNIT" ] || grep -qxF -- "$UNIT" <<<"$units" || die2 "PROD_UNIT $PROD_UNIT is not among the prod units PROD_UNITS_PATTERN '$PROD_UNITS_PATTERN' matches on origin master: the pattern must match every prod unit of $svc, in every region"
+  grep -qxF -- "$PROD_UNIT" <<<"$units" || die2 "PROD_UNIT $PROD_UNIT is not among the prod units PROD_UNITS_PATTERN '$PROD_UNITS_PATTERN' matches on origin master: the pattern must match every prod unit of $svc, in every region"
   while IFS= read -r u; do
     # parse_pin exits on a bad unit; the subshell turns that into "unparseable" (fail closed).
     pin=$(git show "origin/master:$u" > "$tmp/u.hcl" 2>/dev/null &&

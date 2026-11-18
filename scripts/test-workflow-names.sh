@@ -326,9 +326,9 @@ tagcheck "pth-sim tag check: a second line is rejected" 1 $'v2.4.0\nmaster'
 # every gate. release_check <file> exits 0 when: the workflow_call inputs are exactly the
 # consumer contract (all required strings) and it takes no secrets (no CI App); the job runs in
 # environment prod with permissions contents read, id-token write, actions read, pull-requests
-# write; and the steps call, in this order, queue-run-green.sh, open-deploy-pr.sh --pins (and no
-# other open-deploy-pr.sh mode), release-image.sh, ecs-deploy.sh, post-deploy-checks.sh and
-# deploy-comment.sh, none of those steps with an if: or continue-on-error (each runs only when
+# write; and the steps call, in this order, queue-run-green.sh, release-image.sh (the guard reads
+# the running ECS service), ecs-deploy.sh, post-deploy-checks.sh and deploy-comment.sh, and never
+# open-deploy-pr.sh (no infrastructure repo), none of those steps with an if: or continue-on-error (each runs only when
 # every step before it succeeded). Else 1 naming the problem.
 release_check() {
   python3 -I - "$1" <<'PY'
@@ -337,10 +337,10 @@ import re, sys
 path = sys.argv[1]
 base = path.rsplit("/", 1)[-1]
 raw = open(path, encoding="utf-8").read().splitlines()
-WANT = ["service-name", "role-to-assume", "checks-ref", "ci-workflow", "infra-repo",
-        "prod-units-pattern", "ecs-cluster", "ecs-service", "log-group", "alarm-prefix"]
-CHAIN = ["queue-run-green.sh", "open-deploy-pr.sh --pins", "release-image.sh", "ecs-deploy.sh",
-         "post-deploy-checks.sh", "deploy-comment.sh"]
+WANT = ["service-name", "role-to-assume", "checks-ref", "ci-workflow", "ecs-cluster", "ecs-service",
+        "log-group", "alarm-prefix"]
+CHAIN = ["queue-run-green.sh", "release-image.sh", "ecs-deploy.sh", "post-deploy-checks.sh",
+         "deploy-comment.sh"]
 PERMS = {"contents": "read", "id-token": "write", "actions": "read", "pull-requests": "write"}
 
 
@@ -416,9 +416,9 @@ for st in steps:
     text = "\n".join(st)
     if "create-github-app-token" in text:
         fail("the release must not mint a CI App token")
-    if re.search(r"open-deploy-pr\.sh(?!\"?\s+--pins)", text):
-        fail("open-deploy-pr.sh may only be called with --pins (read-only)")
-    found = [c for c in CHAIN if re.search(re.escape(c).replace(r"\ ", r"\"?\s+"), text)]
+    if "open-deploy-pr.sh" in text or "actions/checkout" in text and "inputs.infra-repo" in text:
+        fail("the release must not read or write the infrastructure repo (the guard reads the running ECS service)")
+    found = [c for c in CHAIN if c in text]
     if not found:
         continue
     if re.search(r"^\s+(- )?(if|continue-on-error):", text, re.M):
@@ -447,12 +447,13 @@ b = [x for x in re.findall(r"^```ya?ml\n(.*?)^```", text, re.S | re.M) if "java-
 print(b[0] if b else "")
 PY
 )
-for k in ecs-cluster ecs-service log-group alarm-prefix service-name role-to-assume checks-ref ci-workflow infra-repo prod-units-pattern; do
+for k in ecs-cluster ecs-service log-group alarm-prefix service-name role-to-assume checks-ref ci-workflow; do
   if [[ $readme_release == *"      $k: "* ]]; then pass "README release example passes $k"; else fail "README release example passes $k" "missing"; fi
 done
-for k in app-id prod-unit app-key; do
+for k in app-id prod-unit app-key infra-repo prod-units-pattern; do
   if [[ $readme_release == *"      $k: "* ]]; then fail "README release example drops $k" "still there"; else pass "README release example drops $k"; fi
 done
 if [[ $readme_release == *"pull-requests: write"* ]]; then pass "README release example grants pull-requests: write"; else fail "README release example grants pull-requests: write" "missing"; fi
+if [[ $readme_release == *"vars.DEPLOY_ROLE_ARN"* ]]; then pass "README release example passes vars.DEPLOY_ROLE_ARN"; else fail "README release example passes vars.DEPLOY_ROLE_ARN" "missing"; fi
 
 exit $status

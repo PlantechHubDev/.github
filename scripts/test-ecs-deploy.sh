@@ -2,8 +2,8 @@
 # Tests the release's green gate and deploy scripts with the fake aws and gh in
 # scripts/fixtures/ecs-deploy/bin first on PATH, so nothing touches GitHub or AWS:
 #   queue-run-green.sh   the queue's merge_group run for the merged commit was green
-#   ecs-deploy.sh        force a new deployment, wait for services-stable, compare running digests
-#   post-deploy-checks.sh  digest, deployment COMPLETED, no ERROR logs since, no alarm in ALARM
+#   ecs-deploy.sh        force a new deployment, wait for services-stable (no digest check)
+#   post-deploy-checks.sh  digest (or a child of its index), deployment COMPLETED, no ERROR in the new tasks' log streams since, no alarm in ALARM
 #   deploy-comment.sh    comment on each service PR the deploy carries
 # plus a re-run of a whole release on the same merge (release-image.sh then ecs-deploy.sh).
 # Usage: bash scripts/test-ecs-deploy.sh   (exit 0 when every case passes)
@@ -16,7 +16,7 @@ export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log FAKE_STATE=$T/state
 mkdir -p "$FAKE_STATE"
 unset FAKE_RUNS FAKE_RUNS_EXIT FAKE_JOBS FAKE_JOBS_EXIT FAKE_TASKS FAKE_PREV_TASKS FAKE_UPDATE_ERR \
   FAKE_WAIT_FAIL FAKE_ROLLOUT FAKE_RUNNING FAKE_DESIRED FAKE_LOG_EVENTS FAKE_ALARMS FAKE_FAIL_OP \
-  FAKE_AWS_DENIED FAKE_COMMENT_EXIT FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_TAG_DIGEST GITHUB_OUTPUT GITHUB_STEP_SUMMARY
+  FAKE_AWS_DENIED FAKE_COMMENT_EXIT FAKE_TD FAKE_CHILDREN FAKE_INDEX_MISSING FAKE_SRC_MISSING FAKE_PUT_ERR FAKE_TAG_DIGEST GITHUB_OUTPUT GITHUB_STEP_SUMMARY
 SVC=example-service
 REPO=PlantechHubDev/$SVC
 A=sha256:$(printf 'a%.0s' $(seq 64))   # the released image
@@ -147,55 +147,54 @@ empty "usage: no gh call" "$GH_LOG"
 unset FAKE_RUNS FAKE_JOBS
 
 # ---------------------------------------------------------------- ecs-deploy.sh
+# It only forces the deployment and waits; the digest is checked by post-deploy-checks.sh.
 export FAKE_TASKS FAKE_PREV_TASKS GITHUB_OUTPUT=$T/output
 CL=example-cluster SV=example-service-prod
 FAKE_PREV_TASKS="t1 $B $L"$'\n'"t2 $B $L"
 FAKE_TASKS="t3 $A $L"$'\n'"t4 $A $L"
 : > "$GITHUB_OUTPUT"
-run "deploy: exits 0" 0 ecs-deploy.sh "$CL" "$SV" "$A"
-is   "deploy: prints deployed <digest>" "$(printf '%s\n' "$out" | tail -n 1)" "deployed $A"
+run "deploy: exits 0" 0 ecs-deploy.sh "$CL" "$SV"
+is   "deploy: prints stable <service>" "$(printf '%s\n' "$out" | tail -n 1)" "stable $SV"
 logs "deploy: forces a new deployment of the service" "$AWS_LOG" "ecs update-service --cluster $CL --service $SV --force-new-deployment"
 logs "deploy: waits for services-stable" "$AWS_LOG" "ecs wait services-stable --cluster $CL --services $SV"
-logs "deploy: reads the running tasks" "$AWS_LOG" "ecs list-tasks --cluster $CL --service-name $SV --desired-status RUNNING"
 logs "deploy: previous digest in GITHUB_OUTPUT (the :master container, not the sidecar)" "$GITHUB_OUTPUT" "previous-digest=$B"
-is   "deploy: update before wait" "$(grep -oE 'update-service|wait services-stable' "$AWS_LOG" | tr '\n' ,)" "update-service,wait services-stable,"
+is   "deploy: reads before, then update, then wait, nothing after" "$(grep -oE 'list-tasks|describe-tasks|update-service|wait services-stable' "$AWS_LOG" | tr '\n' ,)" "list-tasks,describe-tasks,update-service,wait services-stable,"
 nologs "deploy: no ECR call" "$AWS_LOG" "ecr "
+FAKE_TASKS="t3 $B $L" run "deploy: does not check the digest (stable is enough)" 0 ecs-deploy.sh "$CL" "$SV"
 
-FAKE_WAIT_FAIL=1 run "deploy: services-stable fails exits 1" 1 ecs-deploy.sh "$CL" "$SV" "$A"
+FAKE_WAIT_FAIL=1 run "deploy: services-stable fails or times out exits 1" 1 ecs-deploy.sh "$CL" "$SV"
 has "deploy: says the service did not become stable" "$err" "stable"
-FAKE_UPDATE_ERR=ServiceNotFoundException run "deploy: update-service fails exits 1" 1 ecs-deploy.sh "$CL" "$SV" "$A"
+FAKE_UPDATE_ERR=ServiceNotFoundException run "deploy: update-service fails exits 1" 1 ecs-deploy.sh "$CL" "$SV"
 nologs "deploy: update failed, no wait" "$AWS_LOG" "wait services-stable"
-FAKE_FAIL_OP=list-tasks run "deploy: cannot read tasks exits 1" 1 ecs-deploy.sh "$CL" "$SV" "$A"
-FAKE_TASKS="t3 $A $L"$'\n'"t4 $B $L" run "deploy: a task on another digest exits 4" 4 ecs-deploy.sh "$CL" "$SV" "$A"
-has "deploy: names the task" "$err" "t4"
-has "deploy: names the digest it runs" "$err" "$B"
-FAKE_TASKS="" run "deploy: no running task exits 4" 4 ecs-deploy.sh "$CL" "$SV" "$A"
+FAKE_FAIL_OP=list-tasks run "deploy: cannot read the running tasks exits 1" 1 ecs-deploy.sh "$CL" "$SV"
+nologs "deploy: cannot read tasks, nothing forced" "$AWS_LOG" "update-service"
 run "deploy usage: no args" 64 ecs-deploy.sh
-run "deploy usage: bad digest" 64 ecs-deploy.sh "$CL" "$SV" sha256:abc
-run "deploy usage: empty cluster" 64 ecs-deploy.sh "" "$SV" "$A"
+run "deploy usage: a third arg" 64 ecs-deploy.sh "$CL" "$SV" "$A"
+run "deploy usage: empty cluster" 64 ecs-deploy.sh "" "$SV"
 empty "deploy usage: no aws call" "$AWS_LOG"
 
 # --- Re-run on the same merge: sha-<7> and master already name the image, prod already runs it.
 MERGE_OUT=$T/rerun-output
 : > "$MERGE_OUT"
 : > "$AWS_LOG"; rm -f "$FAKE_STATE/updated"
-EAST=live/region-a/prod/$SVC/terragrunt.hcl
-WEST=live/region-b/prod/$SVC/terragrunt.hcl
-rerun=$(printf '%s\n%s\n' "$EAST tag:master" "$WEST tag:master" | FAKE_SRC_DIGEST=$A FAKE_PUT_ERR=ImageAlreadyExistsException GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/release-image.sh" $SVC "$MERGE" 2>"$T/err"); rc=$?
+rerun=$(FAKE_SRC_DIGEST=$A FAKE_PUT_ERR=ImageAlreadyExistsException GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/release-image.sh" $SVC "$MERGE" "$CL" "$SV" 2>"$T/err"); rc=$?
 is "re-run: release-image exits 0 (tags already present)" "$rc" 0
 is "re-run: release-image prints the digest" "$(printf '%s\n' "$rerun" | tail -n 1)" "$A"
-rc=0; FAKE_PREV_TASKS="t3 $A"$'\n'"t4 $A" FAKE_TASKS="t5 $A"$'\n'"t6 $A" GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/ecs-deploy.sh" "$CL" "$SV" "$A" >"$T/out" 2>"$T/err" || rc=$?
+rc=0; FAKE_PREV_TASKS="t3 $A"$'\n'"t4 $A" FAKE_TASKS="t5 $A"$'\n'"t6 $A" GITHUB_OUTPUT=$MERGE_OUT bash "$HERE/ecs-deploy.sh" "$CL" "$SV" >"$T/out" 2>"$T/err" || rc=$?
 is "re-run: ecs-deploy exits 0" "$rc" 0
 logs "re-run: the deployment is forced again" "$AWS_LOG" "ecs update-service --cluster $CL --service $SV --force-new-deployment"
 logs "re-run: previous digest is the image itself" "$MERGE_OUT" "previous-digest=$A"
 unset FAKE_TASKS FAKE_PREV_TASKS
 
 # ---------------------------------------------------------------- post-deploy-checks.sh
-export FAKE_TASKS="t3 $A $L"$'\n'"t4 $A $L" FAKE_LOG_EVENTS FAKE_ALARMS
+export FAKE_TASKS="t3 $A $L"$'\n'"t4 $A $L" FAKE_LOG_EVENTS FAKE_ALARMS FAKE_TD FAKE_CHILDREN
 SINCE=2026-11-18T12:00:00Z
 SINCE_MS=1795003200000
 LG=/example/log-group AP=example-service-prod-
-FAKE_LOG_EVENTS="$((SINCE_MS - 1000)) ERROR before the deploy"$'\n'"$((SINCE_MS + 1000)) INFO started"
+# awslogs streams: <awslogs-stream-prefix>/<container name>/<task id>; the fake's app container
+# logs to $LG with prefix ecs. t3 and t4 are the PRIMARY deployment's tasks.
+NEW3=ecs/app/t3 NEW4=ecs/app/t4 OLD=ecs/app/t1
+FAKE_LOG_EVENTS="$((SINCE_MS - 1000)) $NEW3 ERROR before the deploy"$'\n'"$((SINCE_MS + 1000)) $NEW3 INFO started"
 FAKE_ALARMS="${AP}cpu:OK ${AP}5xx:INSUFFICIENT_DATA other-service-prod-cpu:ALARM"
 pdc() { run "$1" "$2" post-deploy-checks.sh "${@:3}"; }
 ARGS=("$CL" "$SV" "$A" "$SINCE" "$LG" "$AP")
@@ -203,28 +202,52 @@ pdc "checks: all pass exits 0" 0 "${ARGS[@]}"
 has "checks: says each check passed" "$out" "deployment COMPLETED"
 hasnt "checks: all pass: no FAIL line" "$out" "FAIL "
 logs "checks: reads the service" "$AWS_LOG" "ecs describe-services --cluster $CL --services $SV"
-logs "checks: reads ERROR lines since <since> (epoch ms)" "$AWS_LOG" "logs filter-log-events --log-group-name $LG --start-time $SINCE_MS --filter-pattern ERROR"
+logs "checks: reads the tasks' task definition" "$AWS_LOG" "ecs describe-task-definition --task-definition td/example-service:7"
+logs "checks: reads ERROR lines since <since> (epoch ms) in the new tasks' streams only" "$AWS_LOG" "logs filter-log-events --log-group-name $LG --start-time $SINCE_MS --filter-pattern ERROR --log-stream-names $NEW3 $NEW4"
 logs "checks: reads the service's alarms" "$AWS_LOG" "cloudwatch describe-alarms --alarm-name-prefix $AP"
+nologs "checks: same digest, no index read" "$AWS_LOG" "batch-get-image"
 empty "checks: reads only (no gh)" "$GH_LOG"
 nologs "checks: changes nothing" "$AWS_LOG" "update-service"
 
-FAKE_TASKS="t3 $A $L"$'\n'"t4 $B $L" pdc "checks: one task on another digest exits 1" 1 "${ARGS[@]}"
+FAKE_TASKS="t3 $A $L"$'\n'"t4 $B $L" pdc "checks: one task on an unrelated digest exits 1" 1 "${ARGS[@]}"
 has "checks: names the task on another digest" "$out$err" "t4"
+logs "checks: mismatch reads the image index of the digest" "$AWS_LOG" "ecr batch-get-image --repository-name $SVC --image-ids imageDigest=$A"
+logs "checks: index read accepts an OCI index" "$AWS_LOG" "application/vnd.oci.image.index.v1+json"
+# Multi-arch: ECS may record the platform manifest's digest, a child of the retagged index.
+C1=sha256:$(printf '1%.0s' $(seq 64)) C2=sha256:$(printf '2%.0s' $(seq 64))
+FAKE_CHILDREN="$C1 $C2" FAKE_TASKS="t3 $C1 $L"$'\n'"t4 $C2 $L" pdc "checks: tasks on child manifests of the index exit 0" 0 "${ARGS[@]}"
+FAKE_CHILDREN="$C1 $C2" FAKE_TASKS="t3 $C1 $L"$'\n'"t4 $A $L" pdc "checks: index digest and a child mixed exit 0" 0 "${ARGS[@]}"
+FAKE_CHILDREN="$C1 $C2" FAKE_TASKS="t3 $C1 $L"$'\n'"t4 $B $L" pdc "checks: a digest outside the index exits 1" 1 "${ARGS[@]}"
+has "checks: names the task outside the index" "$out$err" "t4"
+FAKE_CHILDREN="$C1" FAKE_TASKS="t3 $C1 $C2" pdc "checks: app on a child, sidecar on another digest exits 0" 0 "${ARGS[@]}"
+FAKE_TASKS="t3 $L $C1" FAKE_CHILDREN="$C1" pdc "checks: only the service's container counts (sidecar on the digest)" 1 "${ARGS[@]}"
+FAKE_INDEX_MISSING=1 FAKE_TASKS="t3 $B $L" pdc "checks: index not readable on a mismatch exits 2" 2 "${ARGS[@]}"
 FAKE_TASKS="" pdc "checks: no running task exits 1" 1 "${ARGS[@]}"
 FAKE_ROLLOUT=IN_PROGRESS pdc "checks: deployment IN_PROGRESS exits 1" 1 "${ARGS[@]}"
 has "checks: names the rollout state" "$out$err" "IN_PROGRESS"
 FAKE_ROLLOUT=FAILED pdc "checks: deployment FAILED exits 1" 1 "${ARGS[@]}"
 FAKE_RUNNING=1 pdc "checks: below desired count exits 1" 1 "${ARGS[@]}"
-has "checks: names the counts" "$out$err" "1"
-FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) ERROR boom" pdc "checks: ERROR line after <since> exits 1" 1 "${ARGS[@]}"
+has "checks: names the counts" "$out$err" "1 of 2"
+FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) $NEW4 ERROR boom" pdc "checks: ERROR line in a new task after <since> exits 1" 1 "${ARGS[@]}"
 has "checks: quotes the ERROR line" "$out$err" "ERROR boom"
-FAKE_LOG_EVENTS="$((SINCE_MS - 5000)) ERROR old" pdc "checks: ERROR line before <since> exits 0" 0 "${ARGS[@]}"
+FAKE_LOG_EVENTS="$((SINCE_MS - 5000)) $NEW4 ERROR old" pdc "checks: ERROR line before <since> exits 0" 0 "${ARGS[@]}"
+FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) $OLD ERROR draining" pdc "checks: ERROR line of an old task after <since> exits 0" 0 "${ARGS[@]}"
+FAKE_TASKS="t3 $A $L"$'\n'"t1 $A $L ecs-svc/old" FAKE_LOG_EVENTS="$((SINCE_MS + 5000)) $OLD ERROR draining" \
+  pdc "checks: a task of another deployment is not scanned" 0 "${ARGS[@]}"
+logs "checks: only the PRIMARY deployment's streams" "$AWS_LOG" "--log-stream-names $NEW3 --"
+FAKE_TD='app registry.example.test/example-service:master - -' pdc "checks: no awslogs configuration exits 2" 2 "${ARGS[@]}"
+has "checks: says the log configuration is missing" "$err" "awslogs"
+nologs "checks: never scans the whole group" "$AWS_LOG" "filter-log-events"
+FAKE_TD='app registry.example.test/example-service:master /example/log-group -' pdc "checks: no awslogs-stream-prefix exits 2" 2 "${ARGS[@]}"
+has "checks: says the stream prefix is missing" "$err" "awslogs-stream-prefix"
+nologs "checks: no prefix, never scans the whole group" "$AWS_LOG" "filter-log-events"
+FAKE_TD='app registry.example.test/example-service:master /other/group ecs' pdc "checks: app logs to another group exits 2" 2 "${ARGS[@]}"
 FAKE_ALARMS="${AP}5xx:ALARM" pdc "checks: an alarm in ALARM exits 1" 1 "${ARGS[@]}"
 has "checks: names the alarm" "$out$err" "${AP}5xx"
 FAKE_ROLLOUT=FAILED FAKE_ALARMS="${AP}5xx:ALARM" pdc "checks: every failed check is named" 1 "${ARGS[@]}"
 has "checks: both failures listed (rollout)" "$out$err" "FAILED"
 has "checks: both failures listed (alarm)" "$out$err" "${AP}5xx"
-for op in describe-services list-tasks describe-tasks filter-log-events describe-alarms; do
+for op in describe-services list-tasks describe-tasks describe-task-definition filter-log-events describe-alarms; do
   FAKE_FAIL_OP=$op pdc "checks: $op read error exits 2" 2 "${ARGS[@]}"
 done
 FAKE_AWS_DENIED=1 pdc "checks: denied exits 2" 2 "${ARGS[@]}"
@@ -233,7 +256,7 @@ pdc "checks usage: bad digest" 64 "$CL" "$SV" sha256:x "$SINCE" "$LG" "$AP"
 pdc "checks usage: bad since" 64 "$CL" "$SV" "$A" yesterday "$LG" "$AP"
 pdc "checks usage: empty alarm prefix" 64 "$CL" "$SV" "$A" "$SINCE" "$LG" ""
 empty "checks usage: no aws call" "$AWS_LOG"
-unset FAKE_TASKS FAKE_LOG_EVENTS FAKE_ALARMS
+unset FAKE_TASKS FAKE_LOG_EVENTS FAKE_ALARMS FAKE_TD FAKE_CHILDREN
 
 # ---------------------------------------------------------------- deploy-comment.sh
 G() { git -c commit.gpgsign=false -c user.name=t -c user.email=t@example.invalid "$@"; }
