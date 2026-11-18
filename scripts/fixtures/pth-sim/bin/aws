@@ -42,7 +42,7 @@ case "$1 $2" in
     uri=${FAKE_URI-registry.example/$repo}
     jq -nc --arg r "$repo" --arg u "$uri" '{repositories: [{repositoryName: $r, repositoryUri: $u}]}' ;;
   "sts get-caller-identity")
-    echo '{"UserId":"x","Account":"000000000000","Arn":"arn:aws:sts::000000000000:assumed-role/x/y"}' ;;
+    echo '{"UserId":"x","Account":"123456789","Arn":"arn:aws:sts::123456789:assumed-role/x/y"}' ;;
   "ecr describe-images")
     if [ -n "$digest" ] && [ "$digest" = "${FAKE_DEPLOYED:-}" ]; then
       tags=$(printf '%s' "${FAKE_TAGS-master sha-1111111}" | jq -Rc 'split(" ") | map(select(. != ""))')

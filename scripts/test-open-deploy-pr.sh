@@ -93,7 +93,7 @@ logs "master form: PR created into master on the deploy branch" "$GH_LOG" "pr cr
 is  "master form: stdout is only the PR URL" "$so" "$NEW_URL"
 logs "master form: step summary names the PR" "$GITHUB_STEP_SUMMARY" "$NEW_URL"
 has "body: rollback digest is the old pin" "$(body)" "Rollback digest: $C"
-has "body: names the new image by digest" "$(body)" "000000000000.dkr.ecr.us-east-1.amazonaws.com/$SVC@$A"
+has "body: names the new image by digest" "$(body)" "registry.example.test/$SVC@$A"
 has "body: simulation link" "$(body)" "$SIM"
 has "body: lists PR #11" "$(body)" "PlantechHubDev/$SVC#11"
 has "body: lists PR #12" "$(body)" "PlantechHubDev/$SVC#12"
@@ -200,7 +200,7 @@ setup terragrunt-digest.hcl
 FAKE_OPEN_PRS='[{"number":5,"headRefName":"deploy/orchestration-service-abc1234","url":"u5"}]' \
   DRY_RUN=1 DEPLOY_GIT_NAME='' run "dry run: exits 0 (no bot identity needed)" 0 $SVC "$A" "$MERGE" "$SIM"
 has "dry run: prints the branch" "$out" "$BR"
-has "dry run: prints the diff" "$out" "+    image          = \"000000000000.dkr.ecr.us-east-1.amazonaws.com/$SVC@$A\""
+has "dry run: prints the diff" "$out" "+    image          = \"registry.example.test/$SVC@$A\""
 has "dry run: prints the body" "$out" "Rollback digest: $C"
 has "dry run: names what it would close" "$out" "would close #5"
 no_branch "dry run: nothing pushed"

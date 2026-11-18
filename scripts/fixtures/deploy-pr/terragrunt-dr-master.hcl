@@ -9,8 +9,8 @@ terraform {
 
 inputs = {
   service_name   = "orchestration-service"
-  # image = "000000000000.dkr.ecr.us-east-1.amazonaws.com/orchestration-service:old"
+  # image = "registry.example.test/orchestration-service:old"
     image          = "${local.ecr}/orchestration-service:master"   # pinned by the release workflow
-  sidecar_image  = "000000000000.dkr.ecr.us-east-1.amazonaws.com/log-router:stable"
+  sidecar_image  = "registry.example.test/log-router:stable"
   container_port = 8080
 }
