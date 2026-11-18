@@ -326,7 +326,7 @@ tagcheck "pth-sim tag check: a second line is rejected" 1 $'v2.4.0\nmaster'
 # every gate. release_check <file> exits 0 when: the workflow_call inputs are exactly the
 # consumer contract (all required strings) and it takes no secrets (no CI App); the job runs in
 # environment prod with permissions contents read, id-token write, actions read, pull-requests
-# write; and the steps call, in this order, queue-run-green.sh, release-image.sh (the guard reads
+# write; and the steps call, in this order, release-is-tip.sh, queue-run-green.sh, release-image.sh (the guard reads
 # the running ECS service), ecs-deploy.sh, post-deploy-checks.sh and deploy-comment.sh, and never
 # open-deploy-pr.sh (no infrastructure repo), none of those steps with an if: or continue-on-error (each runs only when
 # every step before it succeeded). Else 1 naming the problem.
@@ -339,7 +339,7 @@ base = path.rsplit("/", 1)[-1]
 raw = open(path, encoding="utf-8").read().splitlines()
 WANT = ["service-name", "role-to-assume", "checks-ref", "ci-workflow", "ecs-cluster", "ecs-service",
         "log-group", "alarm-prefix"]
-CHAIN = ["queue-run-green.sh", "release-image.sh", "ecs-deploy.sh", "post-deploy-checks.sh",
+CHAIN = ["release-is-tip.sh", "queue-run-green.sh", "release-image.sh", "ecs-deploy.sh", "post-deploy-checks.sh",
          "deploy-comment.sh"]
 PERMS = {"contents": "read", "id-token": "write", "actions": "read", "pull-requests": "write"}
 
@@ -439,6 +439,54 @@ expect_release "release fixture: the old deploy-PR release is rejected" 1 "$FIX/
 expect_release "release fixture: retag before the green gate is rejected" 1 "$FIX/release-bad-order.yml" "in this order"
 expect_release "release fixture: deploy step with if: always() is rejected" 1 "$FIX/release-bad-if.yml" "must not have if:"
 expect_release "repo java-service-release.yml: gates, then retag, deploy, checks, comment" 0 "$ROOT/.github/workflows/java-service-release.yml"
+# The release's "Check the inputs" step, run with valid inputs and a given checks-ref: it MUST
+# refuse any checks-ref that is not a release tag vX.Y.Z (as pth-sim.yml does), because the
+# job runs the scripts read at checks-ref with the prod deploy role.
+release_inputs_step() {
+  python3 -I - "$1" <<'PY'
+import re, sys
+raw = open(sys.argv[1], encoding="utf-8").read().splitlines()
+ind = lambda l: len(l) - len(l.lstrip(" "))
+st = next((i for i, l in enumerate(raw) if re.match(r"^\s+- name: Check the inputs\s*$", l)), None)
+if st is None:
+    print("no step 'Check the inputs'"); raise SystemExit(1)
+step = [raw[st]]
+for l in raw[st + 1:]:
+    if l.strip() and ind(l) <= ind(raw[st]):
+        break
+    step.append(l)
+if not re.search(r"^\s+CHECKS_REF:\s*\$\{\{\s*inputs\.checks-ref\s*\}\}\s*$", "\n".join(step), re.M):
+    print("the inputs step must take checks-ref through env CHECKS_REF"); raise SystemExit(1)
+r = next((i for i, l in enumerate(step) if re.match(r"^\s+run:\s*\|\s*$", l)), None)
+if r is None:
+    print("the inputs step needs a run: | script"); raise SystemExit(1)
+out = []
+for l in step[r + 1:]:
+    if l.strip() and ind(l) <= ind(step[r]):
+        break
+    out.append(l[ind(step[r]) + 2:])
+print("\n".join(out))
+PY
+}
+# refcheck <name> <want-exit> <checks-ref>
+refcheck() {
+  local name=$1 want=$2 script out code
+  script=$(release_inputs_step "$ROOT/.github/workflows/java-service-release.yml") || { fail "$name" "$script"; return; }
+  out=$(env GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/master SERVICE=example-service ROLE=role CI_WORKFLOW=ci.yml \
+    ECS_CLUSTER=example-cluster ECS_SERVICE=example-service-prod LOG_GROUP=/example/log-group ALARM_PREFIX=example- \
+    "CHECKS_REF=$3" bash -e -c "$script" 2>&1); code=$?
+  if [ "$code" != "$want" ]; then fail "$name" "exit $code want $want; output: $out"; return; fi
+  if [ "$want" != 0 ] && [[ $out != *"checks-ref"* ]]; then fail "$name" "no checks-ref message in: $out"; return; fi
+  pass "$name"
+}
+refcheck "release inputs: checks-ref v2.6.0 passes" 0 v2.6.0
+refcheck "release inputs: checks-ref v10.0.12 passes" 0 v10.0.12
+refcheck "release inputs: a branch is rejected" 1 master
+refcheck "release inputs: a sha is rejected" 1 3d3c42e5aac5ba805825da76410c181273ba90b1
+refcheck "release inputs: a pre-release is rejected" 1 v2.6.0-rc.1
+refcheck "release inputs: empty is rejected" 1 ""
+refcheck "release inputs: a second line is rejected" 1 $'v2.6.0\nmaster'
+
 # The README's release.yml example passes the new inputs and none of the removed ones.
 readme_release=$(python3 -I - "$ROOT/README.md" <<'PY'
 import re, sys
