@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-# release-image.sh <service> <merge-sha> < pins: pick the image to deploy, <service>:sha-<first 7 of
-# merge-sha> (the image the merge queue built and simulated), and tag it master only when that is
-# safe. stdin is the service's prod units on the infrastructure repo's master, one "<path> <pin>" line
+# release-image.sh <service> <merge-sha> < pins: guard, then tag the image to deploy,
+# <service>:sha-<first 7 of merge-sha> (the image the merge queue built and simulated), as master.
+# stdin is the service's prod units on the infrastructure repo's master, one "<path> <pin>" line
 # per unit in every region, as `open-deploy-pr.sh --pins <service>` prints them (<pin>: digest,
 # tag:<name> or unparseable).
 #
-# - If ANY unit pins tag:master, or any line is unparseable, garbled or missing (no units at
-#   all), the retag is SKIPPED with a ::warning:: naming those units, and the digest is read
-#   read-only. A unit pinning :master pulls it on every task start or scale-up, and ECR
-#   replication moves :master in every region, so moving it would put an unapproved image into
-#   prod. This fails closed: whatever cannot be read as safe means no retag.
-# - Otherwise sha-<7> is retagged as master with scripts/ecr-retag.sh (no rebuild).
+# - Guard: EVERY unit must pin tag:master. java-service-release.yml deploys by moving :master and
+#   forcing a new ECS deployment, so a unit that pins a digest or another tag would not follow
+#   the release, and a line that is unparseable or missing (no units at all) cannot be shown to.
+#   Any such unit exits 3 with an ::error:: naming the units, before any AWS call: nothing is
+#   retagged and nothing in prod changes.
+# - Retag: sha-<7> is tagged master with scripts/ecr-retag.sh (same manifest, no rebuild). A
+#   re-run on the same merge (master already names that image) exits 0.
 #
-# Prints the digest as the last stdout line. When GITHUB_OUTPUT is set, writes digest=<digest>,
-# retagged=true|false (whether :master was moved to it) and held-by=<space-separated unit paths
-# that kept :master from moving; empty when retagged or when no units were listed) there, for
-# the deploy PR's body (open-deploy-pr.sh RETAGGED, HELD_BY).
-# Exit: 0 digest printed; 1 aws failure; 2 sha-<7> not in ECR (never rebuilt; no PR should open);
-# 64 usage.
+# Prints the digest as the last stdout line, and writes digest=<digest> to GITHUB_OUTPUT when set.
+# Exit: 0 retagged (digest printed); 1 aws failure; 2 sha-<7> not in ECR (never rebuilt);
+# 3 a prod unit does not pin :master (no AWS call); 64 usage.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 usage() { echo "release-image: $1" >&2; echo "usage: release-image.sh <service> <merge-sha> < pins" >&2; exit 64; }
@@ -28,30 +26,24 @@ svc=$1 merge=$2
 from=sha-${merge:0:7}
 to=master
 
-blockers="" held="" units=0
+blockers="" units=0
 while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$line" ] || continue
   units=$((units + 1))
   path=${line%% *} pin=${line#* }
   if [ "$path" = "$line" ] || ! [[ $pin =~ ^(digest|tag:[A-Za-z0-9_][A-Za-z0-9_.-]*)$ ]]; then
-    blockers="$blockers ${path} (unparseable: '${pin}')" held="$held $path"
-  elif [ "$pin" = "tag:$to" ]; then
-    blockers="$blockers $path (pins :$to)" held="$held $path"
+    blockers="$blockers ${path} (unparseable: '${pin}');"
+  elif [ "$pin" != "tag:$to" ]; then
+    blockers="$blockers $path (pins $pin);"
   fi
 done
-[ "$units" -gt 0 ] || blockers=" (no prod units listed)"
+[ "$units" -gt 0 ] || blockers=" (no prod units listed);"
 
 if [ -n "$blockers" ]; then
-  echo "::warning::$svc:$to is not moved, because these prod units pin it or cannot be read:$blockers. A task start would run an unapproved image (ECR replication moves the tag in every region). The deploy PR pins $from by digest; :$to moves again once every prod unit pins a digest."
-  digest=$(bash "$HERE/ecr-existing-digest.sh" "$svc" "$from") || { echo "release-image: cannot read $svc:$from in ECR" >&2; exit 1; }
-  [ -n "$digest" ] || { echo "release-image: $svc:$from not found in ECR; nothing is rebuilt and no deploy PR opens" >&2; exit 2; }
-  retagged=false
-else
-  digest=$(bash "$HERE/ecr-retag.sh" "$svc" "$from" "$to"); rc=$?
-  [ "$rc" -eq 0 ] || exit "$rc"
-  retagged=true
+  echo "::error::$svc is not released: every prod unit must pin :$to, so that the forced deployment runs the merged image, and these do not:${blockers%;}. Nothing was retagged and nothing in prod changed."
+  exit 3
 fi
-if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  { echo "digest=$digest"; echo "retagged=$retagged"; echo "held-by=${held# }"; } >> "$GITHUB_OUTPUT"
-fi
+digest=$(bash "$HERE/ecr-retag.sh" "$svc" "$from" "$to"); rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+[ -z "${GITHUB_OUTPUT:-}" ] || echo "digest=$digest" >> "$GITHUB_OUTPUT"
 echo "$digest"

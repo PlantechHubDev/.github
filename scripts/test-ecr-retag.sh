@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests ecr-retag.sh (copy the manifest of <service>:<from-tag> to <to-tag>, no rebuild) and
-# release-image.sh (retag sha-<7> as master only when prod does not pin :master) with the fake aws in scripts/fixtures/deploy-pr/bin first on PATH, so nothing touches AWS.
+# release-image.sh (guard: every prod unit pins :master, else exit 3; then retag sha-<7> as master) with the fake aws in scripts/fixtures/deploy-pr/bin first on PATH, so nothing touches AWS.
 # Usage: bash scripts/test-ecr-retag.sh   (exit 0 when every case passes)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -55,9 +55,11 @@ run "usage: bad service" 64 "Orch/x" sha-abc1234 master
 run "usage: bad tag" 64 $SVC "sha abc" master
 empty "usage: no aws call" "$AWS_LOG"
 
-# --- release-image.sh <service> <merge-sha> < pins: the digest to deploy, retagging only when no
-# prod unit (any region) pins :master or fails to parse. Pins on stdin: "<path> <pin>" per unit,
-# as `open-deploy-pr.sh --pins` prints them.
+# --- release-image.sh <service> <merge-sha> < pins: the guard, then the retag. Every prod unit
+# (any region) MUST pin :master, because the release deploys by retagging :master and forcing a
+# new deployment: a unit pinning a digest or another tag would not follow. Anything else, an
+# unparseable line or no units, exits 3 naming the units, with no AWS call. Pins on stdin:
+# "<path> <pin>" per unit, as `open-deploy-pr.sh --pins` prints them.
 MERGE=abc1234$(printf '0%.0s' $(seq 33))
 export GITHUB_OUTPUT=$T/output
 EAST=live/region-a/prod/$SVC/terragrunt.hcl
@@ -71,51 +73,43 @@ rel() {
 }
 hasnt() { if [[ $2 == *"$3"* ]]; then fail "$1" "has '$3': $2"; else pass "$1"; fi; }
 
-FAKE_TAG_DIGEST=$A rel "east master pin: exits 0" 0 "$EAST tag:master"$'\n' $SVC "$MERGE"
-nologs "east master pin: :master not moved (no put-image)" "$AWS_LOG" "put-image"
-logs "east master pin: sha-<7> digest read read-only" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageTag=sha-abc1234"
-has  "east master pin: warns" "$out" "::warning::"
-has  "east master pin: warning names the unit" "$out" "$EAST"
-is   "east master pin: digest is the last line" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
-logs "east master pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "east master pin: retagged=false in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "retagged=false"
-logs "east master pin: held-by names the unit in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "held-by=$EAST"
+rel "all master pins: exits 0" 0 "$EAST tag:master"$'\n'"$WEST tag:master"$'\n' $SVC "$MERGE"
+logs "all master pins: retagged sha-<7> as master" "$AWS_LOG" "ecr put-image --repository-name $SVC --image-tag master"
+logs "all master pins: from sha-<7>" "$AWS_LOG" "ecr batch-get-image --repository-name $SVC --image-ids imageTag=sha-abc1234"
+is   "all master pins: digest is the last line" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
+logs "all master pins: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
+hasnt "all master pins: no warning or error" "$out$err" "::"
+rel "one master pin (one region): exits 0" 0 "$EAST tag:master"$'\n' $SVC "$MERGE"
+logs "one master pin: retagged" "$AWS_LOG" "put-image"
 
-FAKE_TAG_DIGEST=$A rel "DR master pin: exits 0" 0 "$EAST digest"$'\n'"$WEST tag:master"$'\n' $SVC "$MERGE"
-nologs "DR master pin: :master not moved (no put-image)" "$AWS_LOG" "put-image"
-has  "DR master pin: warning names the region-b unit" "$out" "::warning::"
-has  "DR master pin: names $WEST" "$out" "$WEST"
-hasnt "DR master pin: does not blame the digest-pinned unit" "$out" "$EAST"
-logs "DR master pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "DR master pin: held-by names only the region-b unit" "$GITHUB_OUTPUT" "held-by=$WEST"
+rel "east digest pin: exits 3" 3 "$EAST digest"$'\n'"$WEST tag:master"$'\n' $SVC "$MERGE"
+has  "east digest pin: ::error:: names the unit" "$out$err" "$EAST"
+hasnt "east digest pin: does not blame the :master unit" "$out$err" "$WEST"
+empty "east digest pin: no aws call (no put-image, no update-service)" "$AWS_LOG"
+nologs "east digest pin: no digest output" "$GITHUB_OUTPUT" "digest="
 
-FAKE_TAG_DIGEST=$A rel "DR unparseable: exits 0" 0 "$EAST digest"$'\n'"$WEST unparseable"$'\n' $SVC "$MERGE"
-nologs "DR unparseable: no retag (fails closed)" "$AWS_LOG" "put-image"
-has  "DR unparseable: warning names the unit" "$out" "$WEST"
-FAKE_TAG_DIGEST=$A rel "garbled pin line: exits 0" 0 "$EAST digest"$'\n'"$WEST"$'\n' $SVC "$MERGE"
-nologs "garbled pin line: no retag" "$AWS_LOG" "put-image"
-FAKE_TAG_DIGEST=$A rel "no pins at all: exits 0" 0 "" $SVC "$MERGE"
-nologs "no pins at all: no retag (fails closed)" "$AWS_LOG" "put-image"
-has  "no pins at all: warns" "$out" "::warning::"
-logs "no pins at all: retagged=false" "$GITHUB_OUTPUT" "retagged=false"
+rel "DR digest pin: exits 3" 3 "$EAST tag:master"$'\n'"$WEST digest"$'\n' $SVC "$MERGE"
+has  "DR digest pin: names the region-b unit" "$out$err" "$WEST"
+empty "DR digest pin: no aws call" "$AWS_LOG"
+rel "other tag pin: exits 3" 3 "$EAST tag:latest"$'\n'"$WEST tag:master"$'\n' $SVC "$MERGE"
+has  "other tag pin: names the unit and its pin" "$out$err" "$EAST (pins tag:latest"
+empty "other tag pin: no aws call" "$AWS_LOG"
+rel "DR unparseable: exits 3" 3 "$EAST tag:master"$'\n'"$WEST unparseable"$'\n' $SVC "$MERGE"
+has  "DR unparseable: names the unit" "$out$err" "$WEST"
+empty "DR unparseable: no aws call" "$AWS_LOG"
+rel "garbled pin line: exits 3" 3 "$EAST tag:master"$'\n'"$WEST"$'\n' $SVC "$MERGE"
+empty "garbled pin line: no aws call" "$AWS_LOG"
+rel "no pins at all: exits 3" 3 "" $SVC "$MERGE"
+has  "no pins at all: says so" "$out$err" "no prod units"
+empty "no pins at all: no aws call" "$AWS_LOG"
 
-rel "all digest pins: exits 0" 0 "$EAST digest"$'\n'"$WEST digest"$'\n' $SVC "$MERGE"
-logs "all digest pins: retagged sha-<7> as master" "$AWS_LOG" "ecr put-image --repository-name $SVC --image-tag master"
-logs "all digest pins: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "all digest pins: retagged=true in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "retagged=true"
-logs "all digest pins: held-by empty" "$GITHUB_OUTPUT" "held-by="
-nologs "all digest pins: no retagged=false" "$GITHUB_OUTPUT" "retagged=false"
-hasnt "all digest pins: no warning" "$out" "::warning::"
-rel "other tag pin: exits 0" 0 "$EAST tag:latest"$'\n'"$WEST digest"$'\n' $SVC "$MERGE"
-logs "other tag pin: retagged" "$AWS_LOG" "put-image"
-
-rel "east master pin, sha-<7> missing: exits 2" 2 "$EAST tag:master"$'\n' $SVC "$MERGE"
-has "east master pin, missing: says so" "$err" "sha-abc1234"
-nologs "east master pin, missing: no digest output" "$GITHUB_OUTPUT" "digest="
-FAKE_SRC_MISSING=1 rel "digest pins, sha-<7> missing: exits 2" 2 "$EAST digest"$'\n' $SVC "$MERGE"
-nologs "digest pins, missing: no put-image" "$AWS_LOG" "put-image"
-nologs "digest pins, missing: no digest output" "$GITHUB_OUTPUT" "digest="
-nologs "digest pins, missing: no retagged output" "$GITHUB_OUTPUT" "retagged="
+FAKE_SRC_MISSING=1 rel "all master pins, sha-<7> missing: exits 2" 2 "$EAST tag:master"$'\n' $SVC "$MERGE"
+has "sha-<7> missing: says so" "$err" "sha-abc1234"
+nologs "sha-<7> missing: no put-image" "$AWS_LOG" "put-image"
+nologs "sha-<7> missing: no digest output" "$GITHUB_OUTPUT" "digest="
+FAKE_PUT_ERR=ImageAlreadyExistsException rel "re-run (master already on sha-<7>): exits 0" 0 "$EAST tag:master"$'\n' $SVC "$MERGE"
+is "re-run: prints the digest" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
+FAKE_AWS_DENIED=1 rel "aws failure: exits 1" 1 "$EAST tag:master"$'\n' $SVC "$MERGE"
 rel "usage: extra arg" 64 "" $SVC "$MERGE" digest
 rel "usage: short sha" 64 "" $SVC abc1234
 rel "usage: no args" 64 ""

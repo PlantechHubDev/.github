@@ -280,8 +280,10 @@ is "inputs: pattern with .. matches the unit" "$so" "$UNIT digest"
 PROD_UNITS_PATTERN="^/live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" run "inputs: absolute pattern exits 64" 64 --pins $SVC
 has "inputs: absolute pattern: pattern wording" "$out" "PROD_UNITS_PATTERN must not start with / or ^/"
 PROD_UNITS_PATTERN="/live/[^/]+/prod/$SVC/terragrunt\\.hcl\$" run "inputs: pattern starting with / exits 64" 64 --pins $SVC
-PROD_UNIT='' run "inputs: --pins needs PROD_UNIT" 64 --pins $SVC
-has "inputs: --pins says PROD_UNIT is needed" "$out" "PROD_UNIT"
+# The release workflow lists the pins without a deploy-PR unit (java-service-release.yml has no
+# prod-unit input any more), so --pins takes PROD_UNIT as optional.
+PROD_UNIT='' run "inputs: --pins does not need PROD_UNIT" 0 --pins $SVC
+is "inputs: --pins without PROD_UNIT lists the units" "$so" "$UNIT digest"
 INFRA_REPO='' run "inputs: --pins does not need INFRA_REPO" 0 --pins $SVC
 
 # --- --base-digest: the digest prod is pinned to on origin master (before the retag)
@@ -313,11 +315,12 @@ run "pins: exits 0" 0 --pins $SVC
 is "pins: one line per prod unit, all regions, with its pin" "$so" "$UNIT digest
 $WEST tag:master"
 nologs "pins: no aws call" "$AWS_LOG" "ecr"
-# --pins | release-image.sh: the DR unit's :master pin stops the retag.
+# --pins | release-image.sh: region-a pins a digest, so it would not follow :master; the guard
+# stops the release before the retag (every prod unit must pin :master).
 : > "$AWS_LOG"
 pipe=$( (cd "$W" && bash "$HERE/open-deploy-pr.sh" --pins $SVC) | FAKE_TAG_DIGEST=$A FAKE_SRC_DIGEST=$A GITHUB_OUTPUT=$T/out bash "$HERE/release-image.sh" $SVC "$MERGE" 2>&1)
-nologs "pins | release-image: no put-image while region-b pins :master" "$AWS_LOG" "put-image"
-has "pins | release-image: warning names the region-b unit" "$pipe" "$WEST"
+nologs "pins | release-image: no put-image while region-a pins a digest" "$AWS_LOG" "put-image"
+has "pins | release-image: error names the digest-pinned region-a unit" "$pipe" "$UNIT (pins digest"
 setup terragrunt-digest.hcl
 add_unit "$WEST" terragrunt-digest.hcl
 run "pins: all digests exits 0" 0 --pins $SVC
