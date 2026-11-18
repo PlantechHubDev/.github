@@ -98,7 +98,6 @@ jobs:
         if: steps.find.outputs.found == 'true'
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
         run: |
           printf %s "$TOKEN" | oras login --registry-config "$RUNNER_TEMP/oras-auth.json" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 

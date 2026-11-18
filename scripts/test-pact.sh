@@ -6,7 +6,7 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 FIX=$HERE/fixtures/pact
 export PATH="$FIX/bin:$PATH"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'rm -rf "${T:?}"' EXIT
 export FAKE_ORAS_LOG=$T/oras.log FAKE_GH_LOG=$T/gh.log FAKE_ORAS_STORE=$T/store
 export GITHUB_REPOSITORY=example-org/consumer-a
 unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
@@ -16,7 +16,7 @@ pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1: $2"; status=1; }
 
 reset() {
-  : > "$FAKE_ORAS_LOG"; : > "$FAKE_GH_LOG"; rm -rf "$T/store" "$T/pacts" "$T/out"
+  : > "$FAKE_ORAS_LOG"; : > "$FAKE_GH_LOG"; rm -rf "${T:?}/store" "${T:?}/pacts" "${T:?}/out"
   mkdir -p "$T/store/pacts-consumer-a" "$T/store/pacts-consumer-b" "$T/pacts"
   cp "$FIX/consumer-a-provider-b.json" "$T/store/pacts-consumer-a/"
   cp "$FIX/consumer-a-provider-b.json" "$T/store/pacts-consumer-b/"
@@ -145,7 +145,7 @@ pull_other_error_fails() {
 
 # Mirrors the layout oras pull produces: <dir>/<package>/<file>.
 gp_layout() {
-  reset; rm -rf "$T/gd" "$T/build"
+  reset; rm -rf "${T:?}/gd" "${T:?}/build"
   mkdir -p "$T/gd/pact-results-provider-b" "$T/gd/pacts-consumer-a" "$T/build/pacts"
   cp "$G/base.json" "$T/gd/pacts-consumer-a/consumer-a-provider-b.json"
   cp "$G/new.json" "$T/build/pacts/consumer-a-provider-b.json"
@@ -170,12 +170,12 @@ gate_providers_no_results_is_notice() {
   has "gate_providers_no_results_is_notice: notice" "not onboarded"
 }
 gate_providers_no_base_pact_all_new() {
-  gp_layout; rm "$T/gd/pacts-consumer-a/consumer-a-provider-b.json"
+  gp_layout; rm "${T:?}/gd/pacts-consumer-a/consumer-a-provider-b.json"
   results "$T/gd/pact-results-provider-b/pact-results.json" "x:passed"
   run "gate_providers_no_base_pact_all_new" 1 gate_providers provider-b
 }
 gate_providers_skips_missing_pact() {
-  gp_layout; rm "$T/build/pacts/consumer-a-provider-b.json"
+  gp_layout; rm "${T:?}/build/pacts/consumer-a-provider-b.json"
   run "gate_providers_skips_missing_pact" 0 gate_providers provider-b
   has "gate_providers_skips_missing_pact: notice" "::notice::"
 }
@@ -261,7 +261,7 @@ gate_merge_group_base_ref() {
 # reports-dir/<source>/provider-b.json from the fixture.
 results_layout() {
   local src=${2:-default}
-  reset; rm -rf "$T/pr" "$T/rp"
+  reset; rm -rf "${T:?}/pr" "${T:?}/rp"
   mkdir -p "$T/pr/$src/pacts-consumer-a" "$T/rp/$src"
   cp "$FIX/results/consumer-a-provider-b.json" "$T/pr/$src/pacts-consumer-a/"
   cp "$FIX/results/$1" "$T/rp/$src/provider-b.json"
@@ -295,7 +295,7 @@ pr_failure_recorded_not_fatal() {
   if jq -e '(.interactions | length) == 3 and all(.interactions[]; .status == "failed" and .source == "pr-12")' <<<"$out" >/dev/null; then pass "pr_failure_recorded_not_fatal: all failed from pr-12"; else fail "pr_failure_recorded_not_fatal" "$out"; fi
 }
 results_no_report_for_source_fails_closed() {
-  results_layout report-pass-fail.json; rm -rf "$T/rp/default"
+  results_layout report-pass-fail.json; rm -rf "${T:?}/rp/default"
   run_results "results_no_report_for_source_fails_closed" 0 provider-b "$T/pr" "$T/rp" abc1234
   if jq -e 'all(.interactions[]; .status == "failed")' <<<"$out" >/dev/null; then pass "results_no_report_for_source_fails_closed: failed"; else fail "results_no_report_for_source_fails_closed" "$out"; fi
 }
@@ -366,7 +366,7 @@ pull_then_results_compose() {
   reset; tags_file pacts-consumer-a pr-12 2
   cp "$FIX/results/consumer-a-provider-b.json" "$T/store/pacts-consumer-a/"
   run "pull_then_results_compose: pull" 0 bash "$PULL" --pr-tags 14 "$T/out" pacts-consumer-a
-  rm -rf "$T/rp"; mkdir -p "$T/rp/default" "$T/rp/pr-12"
+  rm -rf "${T:?}/rp"; mkdir -p "$T/rp/default" "$T/rp/pr-12"
   cp "$FIX/results/report-pass-fail.json" "$T/rp/default/provider-b.json"
   cp "$FIX/results/report-all-failed.json" "$T/rp/pr-12/provider-b.json"
   run_results "pull_then_results_compose" 0 provider-b "$T/out" "$T/rp" abc1234

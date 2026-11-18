@@ -135,7 +135,6 @@ jobs:
         env:
           CONSUMERS: ${{ inputs.pact-fetch-consumers }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
         run: |
           # Credentials go to a temporary file, removed when this step ends, so the build (which runs
           # the PR's code) never finds the token in ~/.docker/config.json.
