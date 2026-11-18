@@ -10,7 +10,7 @@
 #       id-token: write    # OIDC to AWS
 #       packages: read     # pth-mysql-test, when mysql-test-image is set
 #     with:
-#       service-name: calc-service
+#       service-name: other-service
 #       role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
 #       checks-ref: vX.Y.Z   # the same tag, so the job runs this tag's scripts
 #     secrets:
@@ -33,7 +33,7 @@ on:
   workflow_call:
     inputs:
       service-name:
-        description: The service name, which is also its ECR repository name, e.g. calc-service.
+        description: The service name, which is also its ECR repository name, e.g. other-service.
         type: string
         required: true
       java-version:

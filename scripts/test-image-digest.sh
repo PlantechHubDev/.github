@@ -23,7 +23,7 @@ check() {
 # shellcheck disable=SC2329  # invoked through check
 digest() { bash "$HERE/image-digest.sh" "$@" < "$FX/$FILE"; }
 # shellcheck disable=SC2329  # invoked through check
-existing() { PATH="$FX/bin:$PATH" FAKE_AWS_MODE=$MODE bash "$HERE/ecr-existing-digest.sh" calc-service sha-1234567; }
+existing() { PATH="$FX/bin:$PATH" FAKE_AWS_MODE=$MODE bash "$HERE/ecr-existing-digest.sh" other-service sha-1234567; }
 
 FILE=metadata-ok.json;      check "metadata: valid prints digest" 0 "$DIGEST" digest
 FILE=metadata-missing.json; check "metadata: missing digest exits 1" 1 "" digest
@@ -39,6 +39,6 @@ MODE=denied;  check "ecr: any other aws error exits 1" 1 "" existing
 # --- usage (64)
 FILE=metadata-ok.json; check "usage: unknown option exits 64" 64 "" digest --bogus
 check "usage: ecr-existing-digest with no args exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh"
-check "usage: ecr-existing-digest with one arg exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh" calc-service
-check "usage: ecr-existing-digest with an empty tag exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh" calc-service ""
+check "usage: ecr-existing-digest with one arg exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh" other-service
+check "usage: ecr-existing-digest with an empty tag exits 64" 64 "" bash "$HERE/ecr-existing-digest.sh" other-service ""
 exit $status

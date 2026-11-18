@@ -41,7 +41,7 @@ Org-wide defaults and shared checks for every PlantechHubDev repo.
 
 The commit standard itself (types, `Refs:`, `BREAKING CHANGE:`, exemptions) is documented in the engineering handbook, `workflow.md`, "Commits".
 
-**Public here, private in `scripts`.** This repo is public, because GitHub only applies org defaults from a public `.github` repo, and because private repos can only call reusable workflows from a public repo (or with extra org settings). Only files that are safe for anyone to read belong here. Anything else tied to our environment (other deploy scripts, hostnames, anything that needs credentials) lives in the private `scripts` repo or in the repo it belongs to. The exception is the trunk release and simulation scripts (`pth-sim.sh`, `deployed-sha.sh`, `release-image.sh`, `ecr-retag.sh`, `open-deploy-pr.sh` and the scripts they call): they live here because reusable workflows run scripts from `checks-ref`, a ref of this repo. Service and environment names that appear in them and in their tests are allowed: service repo names (e.g. `orchestration-service`), `prod-pth-cluster`, the SSO profile name and the `infrastructure-live` layout (`plantechhub/<region>/prod/<service>/terragrunt.hcl`). Secrets, account IDs, ARNs and cloud hostnames are still never allowed; fixtures use placeholder registries (`registry.example.test`) and digests, and the older fixtures keep `example-service`.
+**Public here, private in `scripts`.** This repo is public, because GitHub only applies org defaults from a public `.github` repo, and because private repos can only call reusable workflows from a public repo (or with extra org settings). Only files that are safe for anyone to read belong here. Anything else tied to our environment (other deploy scripts, hostnames, anything that needs credentials) lives in the private `scripts` repo or in the repo it belongs to. The trunk release and simulation scripts (`pth-sim.sh`, `deployed-sha.sh`, `release-image.sh`, `ecr-retag.sh`, `open-deploy-pr.sh` and the scripts they call) live here because reusable workflows run scripts from `checks-ref`, a ref of this repo, so they name no part of our environment: cluster, service, profile, repo and path values come from caller inputs (passed from variables) or from the `pth-test` runner's environment, and tests and fixtures use placeholders (`example-service`, `other-service`, `region-a`, `registry.example.test`).
 
 ## Hygiene rules for this public repo
 
@@ -121,7 +121,7 @@ jobs:
       checks: write
       packages: read
     with:
-      service: orchestration-service
+      service: example-service
       checks-ref: v2.4.0
     secrets:
       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
@@ -145,7 +145,7 @@ jobs:
       id-token: write
       packages: read
     with:
-      service-name: orchestration-service
+      service-name: example-service
       role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
       checks-ref: v2.4.0
     secrets:
@@ -158,7 +158,7 @@ jobs:
     permissions:
       contents: read
     with:
-      service-name: orchestration-service
+      service-name: example-service
       digest: ${{ needs.image.outputs.digest }}
       checks-ref: v2.4.0
 
@@ -206,7 +206,7 @@ jobs:
       id-token: write
       actions: read
     with:
-      service-name: orchestration-service
+      service-name: example-service
       role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
       app-id: ${{ vars.PTH_CI_APP_ID }}
       checks-ref: v2.4.0
