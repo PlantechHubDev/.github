@@ -212,7 +212,7 @@ guardcheck "README ci-ok guard: queue, image failed fails" 1 merge_group failure
 guardcheck "README ci-ok guard: queue, pth-sim cancelled fails" 1 merge_group success cancelled
 guardcheck "README ci-ok guard: pull_request, both skipped passes" 0 pull_request skipped skipped
 
-# --- pth-sim.yml keeps the developer's Mac runner to merge-queue runs at a release tag.
+# --- pth-sim.yml keeps the self-hosted pth-test runner to merge-queue runs at a release tag.
 # pthsim <file> <check|step>: "check" exits 0 when the pth-sim job has the job-level
 # `if: github.event_name == 'merge_group'`, timeout-minutes 90, and a first step (before any
 # checkout) that takes checks-ref through env CHECKS_REF; else 1 with a message. "step" prints

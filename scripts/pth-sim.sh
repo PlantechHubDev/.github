@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
 # pth-sim.sh <service> <sha256:digest> <queue-sha>: the merge queue's prod simulation, run on the
-# developer's Mac (self-hosted runner, labels self-hosted + pth-test) by pth-sim.yml.
+# self-hosted `pth-test` runner (labels self-hosted + pth-test) by pth-sim.yml.
 # It runs the full platform-tests suite on the queue image <digest> of <service> (repo and ECR
-# name, e.g. orchestration-service) against the images prod is running now (--prod-fleet).
+# name, e.g. example-service) against the images prod is running now (--prod-fleet).
+#
+# Runner environment (all required, no defaults: the values are set on the runner, never in this
+# public repo; a missing one is exit 64 naming every missing one):
+#   PTH_ECS_CLUSTER           the prod ECS cluster name
+#   PTH_ECS_SERVICE_TEMPLATE  the prod ECS service name, with {short} for <service> minus -service
+#   PTH_AWS_PROFILE           the read-only AWS SSO profile
+#   PTH_STACK_LIB             path of the handbook's pth-stack library
+#   PT_REF                    path of the handbook's pt-ref
+#   PTH_PT_DIR                path of the platform-tests clone (worktrees go in its .worktrees/)
+#   PTH_DEMO_DIR              the demo checkout platform-tests builds the portal from
+#   PTH_DOCKER_HOST           the Docker daemon socket, as a DOCKER_HOST value
 #
 # Steps, in order:
-#   1. Check the arguments and DEV (the workspace dev dir: engineering-handbook, platform-tests),
-#      MG_HEAD_REF (the merge_group head_ref, refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>;
+#   1. Check the arguments, the runner environment, MG_HEAD_REF (the merge_group head_ref, refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>;
 #      the short form without refs/heads/ is accepted too) and
 #      GITHUB_REPOSITORY. Then, before SSO, the stack lock or npm, check with gh that the queue
 #      entry's branch still exists: a 404 (the queue dropped the entry while the job waited, e.g.
-#      for an asleep Mac) is exit 5, any other gh error exit 2.
+#      for a runner that was offline or asleep) is exit 5, any other gh error exit 2.
 #   2. Read the digest prod is RUNNING for <service> the way platform-tests --prod-fleet does
-#      (ECS service prod-<service>-svc in prod-pth-cluster), and check that <digest> is an image
-#      in <service>'s ECR repository. Read-only, through the developer's SSO profile
-#      ($PTH_AWS_PROFILE, default pth-admin-prod). An expired session stops here, before npm or
-#      the stack lock.
+#      (ECS service PTH_ECS_SERVICE_TEMPLATE in PTH_ECS_CLUSTER), and check that <digest> is an
+#      image in <service>'s ECR repository. Read-only, through the runner's SSO profile
+#      (PTH_AWS_PROFILE). An expired session stops here, before npm or the stack lock.
 #   3. deployed-sha.sh: running digest -> the commit prod runs.
 #   4. pt-ref <service> --release <deployed>..<queue-sha>: the platform-tests commit. More than one
 #      paired platform-tests PR in the range ("split the release") is exit 3; any other pt-ref
@@ -36,11 +45,10 @@
 # deployed sha, pt-ref, stack lease, worktree or npm ci); 3 more than one paired platform-tests
 # change; 4 AWS SSO expired; 5 queue entry gone (its merge-queue branch no longer exists); 64
 # usage. Prints "RESULT <rc>" last.
-# Overrides (tests): PT_REF (pt-ref path), PTH_STACK_LIB (pth-stack library path).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-CLUSTER=prod-pth-cluster
+RUNNER_ENV="PTH_ECS_CLUSTER PTH_ECS_SERVICE_TEMPLATE PTH_AWS_PROFILE PTH_STACK_LIB PT_REF PTH_PT_DIR PTH_DEMO_DIR PTH_DOCKER_HOST"
 SSO_ERRORS='Token has expired|refresh failed|SSO session .*(expired|invalid)|sso.*(expired|invalid)|Unable to locate credentials|ExpiredToken|The config profile .* could not be found|Error loading SSO Token'
 
 svc=${1-} digest=${2-} queue=${3-}
@@ -76,7 +84,10 @@ usage() { echo "usage: pth-sim.sh <service> <sha256:digest> <queue-sha>" >&2; fi
 [[ $svc =~ ^[a-z0-9][a-z0-9-]*-service$ ]] || usage "service must be the repo/ECR name ending in -service (got '$svc')"
 [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || usage "digest must be sha256:<64 hex> (got '$digest'): the queue image job gave no digest"
 [[ $queue =~ ^[0-9a-f]{40}$ ]] || usage "queue sha must be 40 hex (got '$queue')"
-[ -n "${DEV:-}" ] || usage "DEV is not set: the runner's environment must name the workspace dev dir"
+missing=""
+for v in $RUNNER_ENV; do [ -n "${!v:-}" ] || missing="$missing $v"; done
+[ -z "$missing" ] || usage "the pth-test runner's environment must set:$missing"
+[[ $PTH_ECS_SERVICE_TEMPLATE == *"{short}"* ]] || usage "PTH_ECS_SERVICE_TEMPLATE must contain {short} (got '$PTH_ECS_SERVICE_TEMPLATE')"
 # The queue entry's branch: GitHub gives the full refs/heads/gh-readonly-queue/... ref; the short
 # form is accepted too. Same pattern as queue-pr-number.sh; the API path below uses only this value.
 qbranch=${MG_HEAD_REF:-}; qbranch=${qbranch#refs/heads/}
@@ -84,16 +95,14 @@ qbranch=${MG_HEAD_REF:-}; qbranch=${qbranch#refs/heads/}
   || usage "MG_HEAD_REF must be the merge_group head_ref, [refs/heads/]gh-readonly-queue/<base>/pr-<n>-<40 hex> (got '${MG_HEAD_REF:-}')"
 [[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || usage "GITHUB_REPOSITORY must be <owner>/<repo> (got '${GITHUB_REPOSITORY:-}')"
 short=${svc%-service}
-PT_REF=${PT_REF:-$DEV/engineering-handbook/tools/pt-ref/pt-ref}
-PTH_STACK_LIB=${PTH_STACK_LIB:-$HOME/.local/bin/pth-stack}
 
-# Read-only AWS through the developer's SSO profile, as platform-tests lib/aws.ts (awsEnv) does.
+# Read-only AWS through the runner's SSO profile, as platform-tests lib/aws.ts (awsEnv) does.
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_CREDENTIAL_EXPIRATION
-export AWS_PROFILE=${PTH_AWS_PROFILE:-pth-admin-prod} AWS_REGION=us-east-1
+export AWS_PROFILE=$PTH_AWS_PROFILE AWS_REGION=us-east-1
 
 err=$(mktemp); trap 'rm -f "$err"' EXIT
 
-# --- 1b. the queue entry still exists. A job that waited for an asleep Mac must not start a
+# --- 1b. the queue entry still exists. A job that waited for an offline or asleep runner must not start a
 # stale simulation: once the queue drops the entry (it failed, timed out or was removed), its
 # branch is deleted. Checked before SSO, the stack lock and npm.
 if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$qbranch" >/dev/null 2>"$err"; then
@@ -113,12 +122,12 @@ awsj() {
 }
 
 # --- 2. what prod runs, and the queue image
-ecs=prod-$svc-svc
-awsj ecs list-tasks --cluster "$CLUSTER" --service-name "$ecs" --desired-status RUNNING
+ecs=${PTH_ECS_SERVICE_TEMPLATE//\{short\}/$short}
+awsj ecs list-tasks --cluster "$PTH_ECS_CLUSTER" --service-name "$ecs" --desired-status RUNNING
 arns=$(jq -r '.taskArns[]?' <<<"$J")
 [ -n "$arns" ] || finish 2 "no RUNNING task for $ecs" "resolver error"
 # shellcheck disable=SC2086  # one argument per task ARN
-awsj ecs describe-tasks --cluster "$CLUSTER" --tasks $arns
+awsj ecs describe-tasks --cluster "$PTH_ECS_CLUSTER" --tasks $arns
 running=$(jq -r --arg suf "/$svc" '.tasks[] | select(.lastStatus == "RUNNING") | .containers[]?
       | select((.image // "") | sub("[@:].*$"; "") | endswith($suf)) | .imageDigest // ""' <<<"$J" | sort -u)
 case $(printf '%s' "$running" | grep -c .) in
@@ -175,10 +184,10 @@ if ! aws sts get-caller-identity --output json >/dev/null 2>"$err"; then
 fi
 pth_stack_phase prepare
 # shellcheck disable=SC2155  # verbatim from the block
-export DOCKER_CONFIG="$(mktemp -d)" DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
+export DOCKER_CONFIG="$(mktemp -d)" DOCKER_HOST="$PTH_DOCKER_HOST"
 echo '{}' > "$DOCKER_CONFIG/config.json"; ln -s "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
-PT="${DEV}/platform-tests/.worktrees/verify-${PTH_STACK:-1}"; export PTH_DEMO_DIR="${DEV}/demo"
-git -C "${DEV}/platform-tests" fetch -q origin && { [ -e "$PT/.git" ] || git -C "${DEV}/platform-tests" worktree add -q --detach "$PT" "$ptsha"; } &&
+PT="${PTH_PT_DIR}/.worktrees/verify-${PTH_STACK:-1}"; export PTH_DEMO_DIR
+git -C "${PTH_PT_DIR}" fetch -q origin && { [ -e "$PT/.git" ] || git -C "${PTH_PT_DIR}" worktree add -q --detach "$PT" "$ptsha"; } &&
   git -C "$PT" checkout -q --detach "$ptsha" && cd "$PT" && npm ci --no-audit --no-fund || exit 1
 : > "$state/ran"
 pth_stack_phase env_up; up=1; npm run env:up -- --portal --prod-fleet --image "${short}=${uri}@${digest}" && { pth_stack_phase tests; npm test -- --allow-non-master; }; rc=$?

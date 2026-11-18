@@ -1,4 +1,4 @@
-# actionlint configuration. pth-test: the self-hosted runner on the developer's Mac that runs
+# actionlint configuration. pth-test: the self-hosted runner that runs
 # pth-sim.yml (the merge queue's prod simulation on the pth-test stack).
 self-hosted-runner:
   labels:

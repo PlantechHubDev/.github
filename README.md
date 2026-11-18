@@ -23,7 +23,7 @@ Org-wide defaults and shared checks for every PlantechHubDev repo.
 | `.github/workflows/java-service-ci.yml` | Reusable build for a java service. On `merge_group` the diff-cover gate is skipped (the ratchet still runs). Jobs: `test` (no committed `mavenLocal()`, then Gradle `clean build`; skipped on Dependabot runs) and `image-scan` (image built from `test`'s jar, Trivy CRITICAL/HIGH with `.trivyignore`). Inputs `service`, `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
 | `.github/workflows/java-service-publish.yml` | Reusable publish for a java service. Job `build-push`: Gradle `clean build`, then a linux/amd64 + linux/arm64 image to ECR only, tagged `:<branch>` and `:sha-<7>`, through OIDC. Inputs `service`, `java-version`, `ecr-role-arn` (pass `vars.ECR_PUSH_ROLE_ARN`), `mysql-test-image`; secrets `PUBLISH_TOKEN`, optional `TEAMS_WEBHOOK_URI`. |
 | `.github/workflows/java-service-image.yml` | Reusable queue image for a trunk java service: builds the exact merge-queue commit and pushes it to ECR as `:sha-<7>` through OIDC. Jobs `check` (finds an existing image), `build` (Gradle with no AWS credentials, then push), `result`. Output `digest` (`sha256:<64 hex>`); callers `needs` the workflow job and read its `digest`. Inputs `service-name`, `role-to-assume` (pass `vars.ECR_PUSH_ROLE_ARN`), `checks-ref`, `java-version`, `mysql-test-image`; secret `packages-read-token`. |
-| `.github/workflows/pth-sim.yml` | Reusable prod simulation in the merge queue: the full platform-tests suite on the queue image, on the self-hosted `pth-test` runner. Job `pth-sim`: runs only on `merge_group` (job-level `if`), fails before any checkout unless `checks-ref` is a release tag `vX.Y.Z`, and times out at 90 minutes (the queue's check timeout is 180). The org runner group restricts the runner to this workflow at a tag. Inputs `service-name`, `digest`, `checks-ref`. Work is in `scripts/pth-sim.sh`, which exits 5 without simulating when the queue entry's branch is gone. |
+| `.github/workflows/pth-sim.yml` | Reusable prod simulation in the merge queue: the full platform-tests suite on the queue image, on the self-hosted `pth-test` runner. Job `pth-sim`: runs only on `merge_group` (job-level `if`), fails before any checkout unless `checks-ref` is a release tag `vX.Y.Z`, and times out at 90 minutes (the queue's check timeout is 180). The org runner group restricts the runner to this workflow at a tag. Inputs `service-name`, `digest`, `checks-ref`. Work is in `scripts/pth-sim.sh`, which exits 5 without simulating when the queue entry's branch is gone. The runner's environment sets the environment details (see "Trunk repos" below). |
 | `.github/workflows/java-service-release.yml` | Reusable release for a trunk java service, on the caller's push to `master`. Nothing is rebuilt: it retags the queue image `:master` only when no prod unit pins `:master`, and has the CI App open the `infrastructure-live` deploy PR that pins the image digest. Inputs `service-name`, `role-to-assume`, `app-id`, `checks-ref`, `ci-workflow`; secret `app-key`. |
 | `.github/workflows/java-library-ci.yml` | Reusable build for a java library. Job `test` (no committed `mavenLocal()`, then Gradle `clean build`; skipped on Dependabot runs). No `version-check` from v2.0.0: versions are computed at release. Inputs `java-version`, `mysql-test-image`; secret `PUBLISH_TOKEN`. |
 | `.github/workflows/java-library-publish.yml` | Reusable release for a java library, on a push to its release branch. Job `publish-package`: git-cliff with `cliff.toml` computes the version `V` from the commits since the last `vX.Y.Z` tag; never overwrites (a published `V` is skipped only when `v<V>` is on this commit, else the job fails); `RELEASE_VERSION=V` build and `gradle publish`; annotated tag `v<V>`; GitHub Release with git-cliff's notes and the Maven coordinates. Never prunes old versions. Caller grants `contents: write`, `packages: write`. Inputs `artifact-id`, `checks-ref`, `release-branch`, `java-version`, `mysql-test-image`, `git-cliff-version`, `git-cliff-sha256`; secrets `PUBLISH_TOKEN`, optional `LIBRARY_WEBHOOK_URI`. |
@@ -216,6 +216,21 @@ jobs:
 ```
 
 What a caller needs, by name only: org or repo variables `vars.ECR_PUSH_ROLE_ARN` and `vars.PTH_CI_APP_ID`, and secrets `secrets.PTH_CI_APP_KEY` and `secrets.PUBLISH_TOKEN`. The `pth-test` self-hosted runner, the `trunk` ruleset (required check `ci-ok`, merge queue) and the merge queue settings are configured outside this repo: see the engineering handbook and the org rulesets.
+
+The `pth-test` runner's environment MUST set these (names only; the values live on the runner, never in this repo). `pth-sim.sh` has no defaults for them and exits 64 naming every one that is missing:
+
+| Variable | What it names |
+|---|---|
+| `PTH_ECS_CLUSTER` | the prod ECS cluster |
+| `PTH_ECS_SERVICE_TEMPLATE` | the prod ECS service name, with `{short}` standing for the service name without `-service` |
+| `PTH_AWS_PROFILE` | the read-only AWS SSO profile |
+| `PTH_STACK_LIB` | the handbook's `pth-stack` library |
+| `PT_REF` | the handbook's `pt-ref` |
+| `PTH_PT_DIR` | the platform-tests clone (its `.worktrees/` holds the run's worktree) |
+| `PTH_DEMO_DIR` | the demo checkout platform-tests builds the portal from |
+| `PTH_DOCKER_HOST` | the Docker daemon socket, as a `DOCKER_HOST` value |
+
+The runner runs queue jobs only while it is online: a runner that is offline or asleep stalls the queue until it comes back or the job times out.
 
 ## Releasing and adopting a new tag
 

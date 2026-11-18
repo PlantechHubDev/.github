@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests pth-sim.sh with fakes from scripts/fixtures/pth-sim/bin: aws, gh and npm first on PATH,
-# pt-ref through PT_REF, and the pth-stack library through PTH_STACK_LIB. DEV is a temp dir
-# holding a local platform-tests clone (git only, no network), so nothing touches AWS, GitHub,
-# docker or the real pth-test stack.
+# pt-ref through PT_REF, and the pth-stack library through PTH_STACK_LIB. The runner env points at
+# temp dirs (PTH_PT_DIR is a local platform-tests clone, git only, no network) and placeholder
+# names, so nothing touches AWS, GitHub, docker or the real pth-test stack.
 # Usage: bash scripts/test-pth-sim.sh   (exit 0 when every case passes)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -12,21 +12,25 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log PT_LOG=$T/pt.log NPM_LOG=$T/npm.log STACK_LOG=$T/stack.log
 export PT_REF=$BIN/pt-ref PTH_STACK_LIB=$BIN/pth-stack GITHUB_STEP_SUMMARY=$T/summary.md
 unset FAKE_SSO FAKE_SSO_FROM FAKE_URI FAKE_TAGS FAKE_GH_EXIT FAKE_DEPLOYED_2 FAKE_TEST_EXIT FAKE_TEST_SLEEP FAKE_UP_EXIT FAKE_CI_EXIT FAKE_STACK_BUSY FAKE_STACK_REFUSE PT_EXIT PT_ERR
-unset PTH_STACK PTH_STACK_LOCK
+unset PTH_STACK PTH_STACK_LOCK DEV
 
-# A local platform-tests "origin" and its clone at $DEV/platform-tests; pt-ref names its commit.
-export DEV=$T/dev
+# The runner env (set in the pth-test runner's environment; placeholders here). PTH_PT_DIR is a
+# clone of a local platform-tests "origin"; pt-ref names its commit.
+export PTH_ECS_CLUSTER=cluster-a PTH_ECS_SERVICE_TEMPLATE='svc-{short}-ecs' PTH_AWS_PROFILE=profile-a
+export PTH_PT_DIR=$T/runner/platform-tests PTH_DEMO_DIR=$T/runner/demo PTH_DOCKER_HOST=unix://$T/runner/docker.sock
+export NPM_ENV_LOG=$T/npm-env.log
+RUNNER_ENV="PTH_ECS_CLUSTER PTH_ECS_SERVICE_TEMPLATE PTH_AWS_PROFILE PTH_STACK_LIB PT_REF PTH_PT_DIR PTH_DEMO_DIR PTH_DOCKER_HOST"
 G() { git -c commit.gpgsign=false -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@example.invalid "$@"; }
 G init -q "$T/pt-origin" && G -C "$T/pt-origin" commit -q --allow-empty -m one
 PTSHA=$(git -C "$T/pt-origin" rev-parse HEAD)
-mkdir -p "$DEV" && G clone -q "$T/pt-origin" "$DEV/platform-tests"
+mkdir -p "$T/runner" && G clone -q "$T/pt-origin" "$PTH_PT_DIR"
 
 Q=sha256:$(printf 'a%.0s' $(seq 64))           # queue image digest
 D=sha256:$(printf 'd%.0s' $(seq 64))           # digest prod runs
 DEPLOYED=$(printf '1%.0s' $(seq 40))           # its commit (fake gh)
 QSHA=$(printf '2%.0s' $(seq 40))               # queue commit
 export FAKE_QUEUE=$Q FAKE_DEPLOYED=$D FAKE_COMMIT=$DEPLOYED PT_OUT="$PTSHA master"
-SVC=orchestration-service
+SVC=example-service
 # The queue entry's branch (merge_group head_ref) and the repo, as pth-sim.yml passes them.
 QREF=gh-readonly-queue/master/pr-12-$QSHA
 export MG_HEAD_REF=refs/heads/$QREF GITHUB_REPOSITORY=PlantechHubDev/$SVC
@@ -38,7 +42,7 @@ fail() { echo "FAIL $1: $2"; status=1; }
 # run <name> <want-exit> <args...>: pth-sim.sh with fresh logs; stdout+stderr in $out.
 run() {
   local name=$1 want=$2; shift 2
-  : > "$AWS_LOG"; : > "$GH_LOG"; : > "$PT_LOG"; : > "$NPM_LOG"; : > "$STACK_LOG"; : > "$GITHUB_STEP_SUMMARY"
+  : > "$AWS_LOG"; : > "$GH_LOG"; : > "$PT_LOG"; : > "$NPM_LOG"; : > "$NPM_ENV_LOG"; : > "$STACK_LOG"; : > "$GITHUB_STEP_SUMMARY"
   out=$(bash "$HERE/pth-sim.sh" "$@" 2>&1); code=$?
   if [ "$code" = "$want" ]; then pass "$name"; else fail "$name" "exit $code want $want; output: $out"; fi
 }
@@ -55,10 +59,24 @@ last "usage: RESULT 64 is the last line" "RESULT 64"
 run "usage: short digest exits 64" 64 $SVC "sha256:abc" "$QSHA"
 run "usage: missing queue sha exits 64" 64 $SVC "$Q"
 run "usage: bad queue sha exits 64" 64 $SVC "$Q" "1234567"
-run "usage: bad service name exits 64" 64 "orchestration" "$Q" "$QSHA"
+run "usage: bad service name exits 64" 64 "example" "$Q" "$QSHA"
 empty "usage: no aws call" "$AWS_LOG"
-DEV="" run "usage: DEV unset exits 64" 64 $SVC "$Q" "$QSHA"
-has "usage: DEV unset says so" "DEV is not set"
+# --- the runner env: every value is required, with no default in this public repo
+for v in $RUNNER_ENV; do
+  out=$(env -u "$v" bash "$HERE/pth-sim.sh" $SVC "$Q" "$QSHA" 2>&1); code=$?
+  if [ "$code" = 64 ]; then pass "runner env: $v unset exits 64"; else fail "runner env: $v unset exits 64" "exit $code; output: $out"; fi
+  has "runner env: $v unset is named" "$v"
+done
+: > "$AWS_LOG"; : > "$GH_LOG"
+# shellcheck disable=SC2086  # one -u per name
+out=$(env $(printf -- '-u %s ' $RUNNER_ENV) bash "$HERE/pth-sim.sh" $SVC "$Q" "$QSHA" 2>&1); code=$?
+if [ "$code" = 64 ]; then pass "runner env: all unset exits 64"; else fail "runner env: all unset exits 64" "exit $code; output: $out"; fi
+for v in $RUNNER_ENV; do has "runner env: all unset names $v" "$v"; done
+last "runner env: RESULT 64 is the last line" "RESULT 64"
+empty "runner env: no gh call" "$GH_LOG"
+empty "runner env: no aws call" "$AWS_LOG"
+PTH_ECS_SERVICE_TEMPLATE=prod-svc run "runner env: service template without {short} exits 64" 64 $SVC "$Q" "$QSHA"
+has "runner env: says {short} is missing" "{short}"
 
 MG_HEAD_REF="" run "usage: MG_HEAD_REF unset exits 64" 64 $SVC "$Q" "$QSHA"
 has "usage: MG_HEAD_REF unset says so" "MG_HEAD_REF"
@@ -96,14 +114,18 @@ run "pass: exits 0" 0 $SVC "$Q" "$QSHA"
 last "pass: RESULT 0 is the last line" "RESULT 0"
 logs "pass: queue branch checked first" "$GH_LOG" "api repos/PlantechHubDev/$SVC/git/ref/heads/$QREF"
 if [ "$(head -n 1 "$GH_LOG")" = "api repos/PlantechHubDev/$SVC/git/ref/heads/$QREF" ]; then pass "pass: queue branch is the first gh call"; else fail "pass: queue branch is the first gh call" "$(cat "$GH_LOG")"; fi
-logs "pass: running digest read from ECS" "$AWS_LOG" "ecs list-tasks --cluster prod-pth-cluster --service-name prod-$SVC-svc --desired-status RUNNING"
+logs "pass: running digest read from ECS (cluster and service from the runner env)" "$AWS_LOG" "ecs list-tasks --cluster cluster-a --service-name svc-example-ecs --desired-status RUNNING"
+logs "pass: describe-tasks in the runner env's cluster" "$AWS_LOG" "ecs describe-tasks --cluster cluster-a"
+logs "pass: aws runs with the runner env's profile" "$AWS_LOG" "[profile profile-a]"
 logs "pass: queue digest checked in the service's repo" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageDigest=$Q"
 logs "pass: deployed commit from the sha- tag" "$GH_LOG" "commits/1111111"
 logs "pass: pt-ref in release mode deployed..queue" "$PT_LOG" "$SVC --release $DEPLOYED..$QSHA"
-logs "pass: env:up with the queue image by digest (short name)" "$NPM_LOG" "run env:up -- --portal --prod-fleet --image orchestration=registry.example/$SVC@$Q"
+logs "pass: env:up with the queue image by digest (short name)" "$NPM_LOG" "run env:up -- --portal --prod-fleet --image example=registry.example/$SVC@$Q"
+logs "pass: env:up gets the runner env's docker host" "$NPM_ENV_LOG" "DOCKER_HOST=$PTH_DOCKER_HOST"
+logs "pass: env:up gets the runner env's demo dir" "$NPM_ENV_LOG" "PTH_DEMO_DIR=$PTH_DEMO_DIR"
 logs "pass: tests allow a non-master image" "$NPM_LOG" "test -- --allow-non-master"
-logs "pass: npm runs in the verify worktree" "$NPM_LOG" "$DEV/platform-tests/.worktrees/verify-1 | ci"
-if [ "$(git -C "$DEV/platform-tests/.worktrees/verify-1" rev-parse HEAD 2>/dev/null)" = "$PTSHA" ]; then pass "pass: worktree detached at the pt-ref commit"; else fail "pass: worktree detached at the pt-ref commit" "HEAD is not $PTSHA"; fi
+logs "pass: npm runs in the verify worktree" "$NPM_LOG" "$PTH_PT_DIR/.worktrees/verify-1 | ci"
+if [ "$(git -C "$PTH_PT_DIR/.worktrees/verify-1" rev-parse HEAD 2>/dev/null)" = "$PTSHA" ]; then pass "pass: worktree detached at the pt-ref commit"; else fail "pass: worktree detached at the pt-ref commit" "HEAD is not $PTSHA"; fi
 logs "pass: phases recorded" "$STACK_LOG" "phase tests"
 logs "pass: stack released with 0" "$STACK_LOG" "released 0"
 logs "pass: summary names the platform-tests commit" "$GITHUB_STEP_SUMMARY" "$PTSHA"
@@ -174,7 +196,7 @@ empty "refusal: no npm call" "$NPM_LOG"
 last "refusal: RESULT 2 is the last line" "RESULT 2"
 
 # --- registry URI shape
-FAKE_URI="registry.example/orchestration-service extra" run "malformed repository URI exits 2" 2 $SVC "$Q" "$QSHA"
+FAKE_URI="registry.example/example-service extra" run "malformed repository URI exits 2" 2 $SVC "$Q" "$QSHA"
 empty "bad URI: no npm call" "$NPM_LOG"
 FAKE_URI="" run "empty repository URI exits 2" 2 $SVC "$Q" "$QSHA"
 

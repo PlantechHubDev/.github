@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fake aws for test-pth-sim.sh and test-deployed-sha.sh. Logs argv (one line) to $AWS_LOG.
+# Fake aws for test-pth-sim.sh and test-deployed-sha.sh. Logs argv and the profile (one line,
+# "<argv> [profile <AWS_PROFILE>]") to $AWS_LOG.
 # Answers from env (no real AWS):
 #   FAKE_SSO=expired          every call fails with the AWS CLI's expired-SSO-token error (exit 255)
 #   FAKE_SSO=missing          every call fails with "Unable to locate credentials" (exit 253)
@@ -8,7 +9,7 @@
 #   FAKE_TAGS                 space-separated tags on FAKE_DEPLOYED (default "master sha-1111111")
 #   FAKE_URI                  the repositoryUri describe-repositories returns (default registry.example/<repo>)
 # ecr describe-images on any other digest: ImageNotFoundException (exit 254).
-echo "$*" >> "${AWS_LOG:-/dev/null}"
+echo "$* [profile ${AWS_PROFILE:-}]" >> "${AWS_LOG:-/dev/null}"
 # FAKE_SSO_FROM=sts|sts-missing: the session expires (or vanishes) from the first `sts` call on,
 # standing in for an SSO session that ran out while the run waited for a stack.
 case "${FAKE_SSO_FROM:-} $1" in
@@ -32,7 +33,7 @@ case "$1 $2" in
     if [ -n "${FAKE_DEPLOYED_2:-}" ]; then echo '{"taskArns":["arn:task/1","arn:task/2"]}'
     else echo '{"taskArns":["arn:task/1"]}'; fi ;;
   "ecs describe-tasks")
-    svc=${FAKE_SERVICE:-orchestration-service}
+    svc=${FAKE_SERVICE:-example-service}
     t1="{\"taskArn\":\"arn:task/1\",\"lastStatus\":\"RUNNING\",\"containers\":[{\"name\":\"app\",\"image\":\"registry.example/$svc:master\",\"imageDigest\":\"${FAKE_DEPLOYED:-}\"}]}"
     if [ -n "${FAKE_DEPLOYED_2:-}" ]; then
       t2="{\"taskArn\":\"arn:task/2\",\"lastStatus\":\"RUNNING\",\"containers\":[{\"name\":\"app\",\"image\":\"registry.example/$svc:master\",\"imageDigest\":\"$FAKE_DEPLOYED_2\"}]}"

@@ -6,8 +6,8 @@
 # Callers bring the digest from their own source (pth-sim.sh: the digest prod ECS is running).
 #
 # AWS: one read-only call with whatever AWS environment the caller sets (pth-sim.sh: the
-# developer's SSO profile; a CI caller: its OIDC credentials). GitHub: gh, authenticated through
-# GH_TOKEN or the developer's gh login.
+# pth-test runner's SSO profile; a CI caller: its OIDC credentials). GitHub: gh, authenticated through
+# GH_TOKEN or the runner's gh login.
 #
 # Exit: 0 prints the sha; 2 not resolvable (no or several sha- tags, image not found, commit
 # lookup failed); 4 AWS auth failed (SSO expired or no credentials); 64 usage.
