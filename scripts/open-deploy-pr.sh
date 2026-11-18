@@ -35,6 +35,10 @@
 # Environment:
 #   SERVICE_REPO      path to a full-history checkout of PlantechHubDev/<service> (required)
 #   BASE_DIGEST       the rollback digest, required when master pins a tag rather than a digest
+#   RETAGGED          true|false (required): release-image.sh's retagged output. The body (a SOC 2
+#                     change record) says the image was retagged as :master, or that :master was
+#                     not moved because a prod unit pins it (or could not be read)
+#   HELD_BY           optional: release-image.sh's held-by output, the units named in that case
 #   DEPLOY_GIT_NAME   commit identity: the CI App's bot, e.g. "<app-slug>[bot]"           (required
 #   DEPLOY_GIT_EMAIL  "<bot user id>+<app-slug>[bot]@users.noreply.github.com"              unless DRY_RUN)
 #   GITHUB_STEP_SUMMARY  optional; see Output above
@@ -80,6 +84,7 @@ else
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || usage "digest must be sha256:<64 hex> (got '$digest')"
   [[ $merge =~ ^[0-9a-f]{40}$ ]] || usage "merge-sha must be 40 hex (got '$merge')"
   [ -n "$sim" ] || usage "sim-run-url is empty (pass the run URL or '$NOT_FOUND')"
+  [[ ${RETAGGED:-} =~ ^(true|false)$ ]] || usage "RETAGGED must be true or false (release-image.sh's retagged output; got '${RETAGGED:-}')"
   if [ "${DRY_RUN:-}" != 1 ]; then
     { [ -n "${DEPLOY_GIT_NAME:-}" ] && [ -n "${DEPLOY_GIT_EMAIL:-}" ]; } || usage "DEPLOY_GIT_NAME and DEPLOY_GIT_EMAIL (the CI App's bot identity) must be set"
   fi
@@ -172,7 +177,12 @@ fi
 
 body=$tmp/body.md
 {
-  echo "Deploy $svc $sha7 to prod: the image the merge queue built and simulated, retagged as master (not rebuilt)."
+  if [ "$RETAGGED" = true ]; then
+    echo "Deploy $svc $sha7 to prod: the image the merge queue built and simulated, retagged as \`:master\` without rebuilding."
+  else
+    held=${HELD_BY:-}; held=${held:+ ($held)}
+    echo "Deploy $svc $sha7 to prod: the image the merge queue built and simulated (not rebuilt). \`:master\` was not moved, because a prod unit pins \`:master\` or could not be read$held, so this PR pins the image by digest."
+  fi
   echo
   echo "- Image: \`$new_val\`"
   echo "- Commit: https://github.com/$ORG/$svc/commit/$merge"

@@ -12,7 +12,9 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # An empty global git config, so the developer's signing or hooks never reach these repos.
 : > "$T/gitconfig"; export GIT_CONFIG_GLOBAL=$T/gitconfig GIT_CONFIG_NOSYSTEM=1
 export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log GH_BODY=$T/body.md GITHUB_STEP_SUMMARY=$T/summary.md
-unset FAKE_OPEN_PRS FAKE_GH_CREATE_EXIT FAKE_GH_CLOSE_EXIT FAKE_RUNS FAKE_RUNS_EXIT FAKE_TAG_DIGEST FAKE_AWS_DENIED BASE_DIGEST DRY_RUN SERVICE_GH_TOKEN INFRA_REPO
+unset FAKE_OPEN_PRS FAKE_GH_CREATE_EXIT FAKE_GH_CLOSE_EXIT FAKE_RUNS FAKE_RUNS_EXIT FAKE_TAG_DIGEST FAKE_AWS_DENIED BASE_DIGEST DRY_RUN SERVICE_GH_TOKEN INFRA_REPO HELD_BY
+# release-image.sh's outputs, passed by java-service-release.yml: did :master move, and if not, which units held it.
+export RETAGGED=true
 
 SVC=orchestration-service
 UNIT=plantechhub/us-east-1/prod/$SVC/terragrunt.hcl
@@ -74,13 +76,24 @@ is()     { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "got '$2' want '$3
 logs()   { if grep -qF -- "$3" "$2"; then pass "$1"; else fail "$1" "$(basename "$2") lacks '$3': $(cat "$2")"; fi; }
 nologs() { if grep -qF -- "$3" "$2"; then fail "$1" "$(basename "$2") has '$3'"; else pass "$1"; fi; }
 body()   { cat "$GH_BODY" 2>/dev/null; }
+# golden <name> <fixture>: the PR body equals scripts/fixtures/deploy-pr/<fixture> exactly, with
+# @MERGE@, @S7@ and @DEPLOYED7@ filled in.
+golden() {
+  local d
+  if d=$(diff <(sed -e "s/@MERGE@/$MERGE/g" -e "s/@S7@/$S7/g" -e "s/@DEPLOYED7@/${DEPLOYED:0:7}/g" "$FIX/$2") "$GH_BODY" 2>&1); then
+    pass "$1"
+  else
+    fail "$1" "body differs from $2: $d"
+  fi
+}
 # remote_file <ref>: the unit file at <ref> in the origin.
 remote_file() { git -C "$O" show "$1:$UNIT" 2>/dev/null; }
 no_branch() { if git -C "$O" rev-parse -q --verify "refs/heads/$BR" >/dev/null; then fail "$1" "origin has $BR"; else pass "$1"; fi; }
 
 # --- :master form, rollback digest from BASE_DIGEST (resolved before the retag)
 setup terragrunt-master.hcl
-BASE_DIGEST=$C run "master form: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
+RETAGGED=false HELD_BY="$UNIT plantechhub/us-west-2/prod/$SVC/terragrunt.hcl" BASE_DIGEST=$C run "master form: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
+golden "master form, not retagged: golden PR body (says :master was not moved, names the units)" body-not-retagged.md
 if diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl" >/dev/null; then pass "master form: unit pinned to the digest, other lines unchanged"; else fail "master form: unit pinned" "$(diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl")"; fi
 if diff <(remote_file master) "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: origin master untouched"; else fail "master form: origin master untouched" "master changed"; fi
 if diff <(git -C "$O" show "$BR:plantechhub/us-east-1/prod/calc-service/terragrunt.hcl") "$FIX/terragrunt-master.hcl" >/dev/null; then pass "master form: other unit untouched"; else fail "master form: other unit untouched" "calc-service changed"; fi
@@ -133,6 +146,8 @@ setup terragrunt-digest.hcl
 run "digest form: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
 if diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl" >/dev/null; then pass "digest form: unit rewritten, other lines unchanged"; else fail "digest form: unit rewritten" "$(diff <(remote_file "$BR") "$FIX/terragrunt-expected.hcl")"; fi
 has "digest form: rollback digest is the old digest" "$(body)" "Rollback digest: $C"
+golden "digest form, retagged: golden PR body (says retagged as :master without rebuilding)" body-retagged.md
+hasnt "digest form, retagged: does not say :master was not moved" "$(body)" "not moved"
 
 # --- older deploy PRs of this service are closed, others untouched
 setup terragrunt-digest.hcl
@@ -145,6 +160,7 @@ logs "supersede: older PR closed with a comment naming the new PR" "$GH_LOG" "pr
 nologs "supersede: other service's PR untouched" "$GH_LOG" "pr close 6"
 nologs "supersede: longer service name with the same prefix untouched" "$GH_LOG" "pr close 7"
 nologs "supersede: non-deploy branch untouched" "$GH_LOG" "pr close 9"
+has "supersede: body keeps the rollback digest" "$(body)" "Rollback digest: $C"
 
 # --- PRs from forks are never closed or reused, even on a deploy/ branch name
 setup terragrunt-digest.hcl
@@ -216,6 +232,10 @@ setup terragrunt-digest.hcl
 run "simulation not found: exits 0" 0 $SVC "$A" "$MERGE" "simulation run: not found"
 has "simulation not found: body says so" "$(body)" "simulation run: not found"
 
+setup terragrunt-digest.hcl
+RETAGGED=false HELD_BY='' run "not retagged, no units named: exits 0" 0 $SVC "$A" "$MERGE" "$SIM"
+has "not retagged, no units named: still says :master was not moved" "$(body)" "\`:master\` was not moved, because a prod unit pins \`:master\` or could not be read, so this PR pins the image by digest."
+
 # --- usage (64)
 setup terragrunt-master.hcl
 run "usage: no args" 64
@@ -226,6 +246,9 @@ run "usage: bad service" 64 "Orch/x" "$A" "$MERGE" "$SIM"
 run "usage: master form needs BASE_DIGEST" 64 $SVC "$A" "$MERGE" "$SIM"
 has "usage: says BASE_DIGEST is needed" "$out" "BASE_DIGEST"
 DEPLOY_GIT_NAME='' BASE_DIGEST=$C run "usage: no bot identity" 64 $SVC "$A" "$MERGE" "$SIM"
+RETAGGED='' BASE_DIGEST=$C run "usage: RETAGGED unset" 64 $SVC "$A" "$MERGE" "$SIM"
+has "usage: says RETAGGED is needed" "$out" "RETAGGED"
+RETAGGED=yes BASE_DIGEST=$C run "usage: RETAGGED not true|false" 64 $SVC "$A" "$MERGE" "$SIM"
 SERVICE_REPO=$T/nowhere BASE_DIGEST=$C run "usage: SERVICE_REPO not a repo" 64 $SVC "$A" "$MERGE" "$SIM"
 nologs "usage: no PR created" "$GH_LOG" "pr create"
 no_branch "usage: nothing pushed"

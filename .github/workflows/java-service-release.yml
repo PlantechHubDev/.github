@@ -161,8 +161,8 @@ jobs:
           bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --pins "$SERVICE" > "$RUNNER_TEMP/prod-pins" || exit 1
           echo "Prod units:"; cat "$RUNNER_TEMP/prod-pins"
 
-      # Writes digest= to GITHUB_OUTPUT; skips the retag (with a warning) while any prod unit pins
-      # :master or cannot be parsed.
+      # Writes digest=, retagged=true|false and held-by= to GITHUB_OUTPUT; skips the retag (with a
+      # warning) while any prod unit pins :master or cannot be parsed.
       - name: Pick the simulated image; tag it master unless a prod unit pins master
         id: retag
         env:
@@ -197,6 +197,9 @@ jobs:
           DIGEST: ${{ steps.retag.outputs.digest }}
           SIM_URL: ${{ steps.sim.outputs.url }}
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          # The PR body says whether :master moved, so the change record is true either way.
+          RETAGGED: ${{ steps.retag.outputs.retagged }}
+          HELD_BY: ${{ steps.retag.outputs.held-by }}
           DEPLOY_GIT_NAME: ${{ steps.bot.outputs.name }}
           DEPLOY_GIT_EMAIL: ${{ steps.bot.outputs.email }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
