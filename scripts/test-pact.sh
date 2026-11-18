@@ -9,7 +9,7 @@ export PATH="$FIX/bin:$PATH"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export FAKE_ORAS_LOG=$T/oras.log FAKE_GH_LOG=$T/gh.log FAKE_ORAS_STORE=$T/store
 export GITHUB_REPOSITORY=example-org/consumer-a
-unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME
+unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
 status=0
 
 pass() { echo "PASS $1"; }
@@ -20,7 +20,7 @@ reset() {
   mkdir -p "$T/store/pacts-consumer-a" "$T/store/pacts-consumer-b" "$T/pacts"
   cp "$FIX/consumer-a-provider-b.json" "$T/store/pacts-consumer-a/"
   cp "$FIX/consumer-a-provider-b.json" "$T/store/pacts-consumer-b/"
-  unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME
+  unset EVENT_DEFAULT_BRANCH FAKE_GH_DEFAULT_BRANCH FAKE_ORAS_NOT_FOUND FAKE_ORAS_UNKNOWN FAKE_ORAS_DENIED FAKE_ORAS_BROKEN GITHUB_REF_NAME ORAS_REGISTRY_CONFIG
 }
 # run <name> <want-exit> <cmd...>: output (stdout+stderr) in $out.
 run() {
@@ -31,6 +31,7 @@ run() {
 has()    { if [[ $out == *"$2"* ]]; then pass "$1"; else fail "$1" "output lacks '$2': $out"; fi; }
 hasnt()  { if [[ $out == *"$2"* ]]; then fail "$1" "output has '$2': $out"; else pass "$1"; fi; }
 logs()   { if grep -qF -- "$3" "$2"; then pass "$1"; else fail "$1" "$(basename "$2") lacks '$3': $(cat "$2")"; fi; }
+nologs() { if grep -qF -- "$3" "$2"; then fail "$1" "$(basename "$2") has '$3'"; else pass "$1"; fi; }
 empty()  { if [ -s "$2" ]; then fail "$1" "$(basename "$2") not empty: $(cat "$2")"; else pass "$1"; fi; }
 exists() { if [ -f "$2" ]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 
@@ -88,6 +89,39 @@ pull_denied_is_notice() {
   has "pull_denied_is_notice: mentions the grant" "Actions access grant"
   exists "pull_denied_is_notice: other pulled" "$T/out/pacts-consumer-b/consumer-a-provider-b.json"
 }
+pull_manifest_unknown_is_notice() {
+  reset; export FAKE_ORAS_UNKNOWN="pacts-consumer-a"
+  run "pull_manifest_unknown_is_notice" 0 bash "$PULL" "$T/out" pacts-consumer-a pacts-consumer-b
+  has "pull_manifest_unknown_is_notice: notice" "::notice::pacts-consumer-a:default not readable"
+  exists "pull_manifest_unknown_is_notice: other pulled" "$T/out/pacts-consumer-b/consumer-a-provider-b.json"
+}
+pull_all_skipped_creates_out_dir() {
+  reset; export FAKE_ORAS_DENIED="pacts-consumer-a pacts-consumer-b"
+  run "pull_all_skipped_creates_out_dir" 0 bash "$PULL" "$T/out" pacts-consumer-a pacts-consumer-b
+  if [ -d "$T/out" ]; then pass "pull_all_skipped_creates_out_dir: dir exists"; else fail "pull_all_skipped_creates_out_dir" "$T/out missing"; fi
+}
+pull_uses_registry_config() {
+  reset; export ORAS_REGISTRY_CONFIG="$T/auth.json"
+  run "pull_uses_registry_config" 0 bash "$PULL" "$T/out" pacts-consumer-a
+  logs "pull_uses_registry_config: flag passed" "$FAKE_ORAS_LOG" "--registry-config $T/auth.json"
+}
+pull_without_registry_config_omits_flag() {
+  reset
+  run "pull_without_registry_config_omits_flag" 0 bash "$PULL" "$T/out" pacts-consumer-a
+  nologs "pull_without_registry_config_omits_flag: no flag" "$FAKE_ORAS_LOG" "--registry-config"
+}
+pull_rejects_bad_package_name() {
+  reset
+  run "pull_rejects_bad_package_name" 2 bash "$PULL" "$T/out" 'pacts-consumer-a;x' 
+  has "pull_rejects_bad_package_name: error" "::error::"
+  empty "pull_rejects_bad_package_name: no oras call" "$FAKE_ORAS_LOG"
+}
+push_uses_registry_config() {
+  reset; export EVENT_DEFAULT_BRANCH=develop GITHUB_REF_NAME=develop ORAS_REGISTRY_CONFIG="$T/auth.json"
+  cp "$FIX/consumer-a-provider-b.json" "$T/pacts/"
+  run "push_uses_registry_config" 0 bash "$PUSH" pacts-consumer-a "$T/pacts" abcdef1234
+  logs "push_uses_registry_config: flag passed" "$FAKE_ORAS_LOG" "--registry-config $T/auth.json"
+}
 pull_other_error_fails() {
   reset; export FAKE_ORAS_BROKEN="pacts-consumer-a"
   run "pull_other_error_fails" 1 bash "$PULL" "$T/out" pacts-consumer-a pacts-consumer-b
@@ -102,5 +136,11 @@ push_skips_non_default_branch
 push_skips_empty_dir
 pull_missing_package_is_notice
 pull_denied_is_notice
+pull_manifest_unknown_is_notice
+pull_all_skipped_creates_out_dir
+pull_uses_registry_config
+pull_without_registry_config_omits_flag
+pull_rejects_bad_package_name
+push_uses_registry_config
 pull_other_error_fails
 exit $status

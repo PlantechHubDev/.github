@@ -133,9 +133,13 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
+          # Credentials go to a temporary file, removed when this step ends, so the build (which runs
+          # the PR's code) never finds the token in ~/.docker/config.json.
+          export ORAS_REGISTRY_CONFIG="$RUNNER_TEMP/oras-auth.json"
+          trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
           bash .pth-checks-pact/scripts/pact/install-oras.sh
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          printf %s "$TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          printf %s "$TOKEN" | oras login --registry-config "$ORAS_REGISTRY_CONFIG" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           # shellcheck disable=SC2086  # CONSUMERS is a space-separated list of package names
           bash .pth-checks-pact/scripts/pact/oci-pull.sh "$RUNNER_TEMP/pacts" $CONSUMERS
           echo "PACT_FOLDER=$RUNNER_TEMP/pacts" >> "$GITHUB_ENV"

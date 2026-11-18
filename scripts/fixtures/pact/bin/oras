@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Stub for `oras`, used by scripts/test-pact.sh. Appends each call's argv (one line) to
 # $FAKE_ORAS_LOG. `pull <host>/<org>/<pkg>:<tag> -o <dir>` copies $FAKE_ORAS_STORE/<pkg>/* into
-# <dir>, unless <pkg> is listed in $FAKE_ORAS_NOT_FOUND, $FAKE_ORAS_DENIED or $FAKE_ORAS_BROKEN,
-# which fail the way the registry client does. `login` just drains stdin.
+# <dir>, unless <pkg> is listed in $FAKE_ORAS_NOT_FOUND, $FAKE_ORAS_UNKNOWN, $FAKE_ORAS_DENIED or $FAKE_ORAS_BROKEN,
+# which fail the way the registry client does. The out dir is created only on a successful
+# pull, as oras does. `login` just drains stdin.
 echo "$*" >> "${FAKE_ORAS_LOG:?}"
 cmd=${1:-}
 case "$cmd" in
   login) cat >/dev/null; exit 0 ;;
   push) exit 0 ;;
   pull)
-    ref=$2; out=""; prev=""
-    for a in "$@"; do [ "$prev" = "-o" ] && out=$a; prev=$a; done
+    ref=""; out=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = "-o" ] && out=$a
+      case "$a" in ghcr.io/*) ref=$a ;; esac
+      prev=$a
+    done
     pkg=${ref#*/*/}; pkg=${pkg%%:*}
     in_list() { case " $1 " in *" $pkg "*) return 0 ;; *) return 1 ;; esac; }
     if in_list "${FAKE_ORAS_NOT_FOUND:-}"; then
       echo "Error: $ref: not found" >&2; exit 1
+    elif in_list "${FAKE_ORAS_UNKNOWN:-}"; then
+      echo "Error: $ref: manifest unknown" >&2; exit 1
     elif in_list "${FAKE_ORAS_DENIED:-}"; then
       echo "Error response from registry: denied: requested access to the resource is denied" >&2; exit 1
     elif in_list "${FAKE_ORAS_BROKEN:-}"; then
