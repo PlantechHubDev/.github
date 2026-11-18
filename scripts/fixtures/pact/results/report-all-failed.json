@@ -1,0 +1,14 @@
+{
+  "provider": { "name": "provider-b" },
+  "execution": [
+    {
+      "consumer": { "name": "consumer-a", "source": { "file": "/tmp/pacts/pr-12/pacts-consumer-a/consumer-a-provider-b.json" } },
+      "interactions": [
+        { "interaction": { "description": "a request for a thing" }, "verification": { "result": "failed" } },
+        { "interaction": { "description": "a request to delete a thing" }, "verification": { "result": "failed" } },
+        { "interaction": { "description": "a request to create a thing" }, "verification": { "result": "failed" } }
+      ],
+      "pending": false
+    }
+  ]
+}

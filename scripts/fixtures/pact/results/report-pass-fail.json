@@ -1,0 +1,20 @@
+{
+  "metaData": { "date": "2026-11-18T10:00:00Z", "pactJvmVersion": "4.6.x", "reportFormat": "0.0.0" },
+  "provider": { "name": "provider-b" },
+  "execution": [
+    {
+      "consumer": { "name": "consumer-a", "source": { "file": "/tmp/pacts/default/pacts-consumer-a/consumer-a-provider-b.json" } },
+      "interactions": [
+        {
+          "interaction": { "description": "a request for a thing", "request": { "method": "GET", "path": "/things/1" }, "response": { "status": 200 } },
+          "verification": { "result": "OK" }
+        },
+        {
+          "interaction": { "description": "a request to delete a thing", "request": { "method": "DELETE", "path": "/things/1" }, "response": { "status": 204 } },
+          "verification": { "result": "failed", "status": { "message": ["expected status 204 but was 500"] } }
+        }
+      ],
+      "pending": false
+    }
+  ]
+}

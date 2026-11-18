@@ -1,0 +1,12 @@
+{
+  "consumer": { "name": "consumer-a" },
+  "provider": { "name": "provider-b" },
+  "interactions": [
+    {
+      "description": "a request for a thing",
+      "providerStates": [{ "name": "thing 1 exists" }],
+      "request": { "method": "GET", "path": "/things/1" },
+      "response": { "status": 200, "body": { "id": 1 }, "matchingRules": { "body": { "$.id": { "match": "type" } } } }
+    }
+  ]
+}

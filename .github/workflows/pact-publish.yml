@@ -1,0 +1,132 @@
+# Publish a consumer repo's contract (Pact) files to GHCR. Called from the repo's publish.yml,
+# after java-service-publish.yml has uploaded the `pacts` artifact:
+#
+#   pacts:
+#     needs: publish
+#     uses: PlantechHubDev/.github/.github/workflows/pact-publish.yml@vX.Y.Z
+#     permissions:
+#       actions: read      # lists this run's artifacts
+#       contents: read
+#       packages: write
+#     with:
+#       package: pacts-consumer-a
+#
+# Job publish: looks for the artifact in this run (a notice and no push when it is absent; a failed
+# download fails the job). With `tag` empty it pushes only on the default branch, the *.json files to
+# ghcr.io/plantechhubdev/<package> tagged `default` and `sha-<7>`; on other branches it prints a notice
+# and skips the install, login and push. With input `tag` (pr-<n> only) it pushes only that tag, on any
+# branch. The package needs a "Manage Actions access" grant for the consumer repo (Write), and one for
+# each provider repo (Read).
+
+name: pact-publish
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: GHCR package name for this repo's contracts, e.g. pacts-consumer-a.
+        type: string
+        required: true
+      checks-ref:
+        description: Tag of PlantechHubDev/.github whose scripts to use. A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
+        type: string
+        default: v2.3.0
+      artifact:
+        description: Name of the artifact holding the *.json contract files.
+        type: string
+        default: pacts
+      tag:
+        description: Push only this pr-<n> tag, on any branch, instead of default and sha-<7> on the default branch only.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read      # lists this run's artifacts
+      contents: read
+      packages: write
+    steps:
+      - name: Check the inputs
+        env:
+          PACKAGE: ${{ inputs.package }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ $PACKAGE =~ ^[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::package must be lower-case letters, digits, dots, dashes and underscores (got '$PACKAGE')"; exit 1; }
+          [[ -z $TAG || $TAG =~ ^pr-[0-9]+$ ]] || { echo "::error::tag must be empty or pr-<n> (got '$TAG')"; exit 1; }
+
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      # Absence is checked on purpose, so a failed download below fails the job instead of
+      # being mistaken for "nothing to publish".
+      - name: Look for the contract artifact
+        id: find
+        env:
+          ARTIFACT: ${{ inputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].name')
+          if grep -Fxq -- "$ARTIFACT" <<<"$names"; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No '$ARTIFACT' artifact in this run; no contracts to publish"
+          fi
+
+      # With no tag, only the default branch publishes; other branches skip before any write token is handled.
+      - name: Decide whether to publish
+        id: branch
+        env:
+          TAG: ${{ inputs.tag }}
+          EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$TAG" ] || [ "$GITHUB_REF_NAME" = "$(bash .pth-checks/scripts/pact/default-branch.sh)" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Not publishing: $GITHUB_REF_NAME is not the default branch and no tag was given"
+          fi
+
+      - name: Download the contract files
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: pacts
+
+      - name: Install oras
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
+        run: bash .pth-checks/scripts/pact/install-oras.sh
+
+      - name: Log in to GHCR
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf %s "$TOKEN" | oras login --registry-config "$RUNNER_TEMP/oras-auth.json" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push the contract files
+        if: steps.find.outputs.found == 'true' && steps.branch.outputs.publish == 'true'
+        env:
+          PACKAGE: ${{ inputs.package }}
+          TAG: ${{ inputs.tag }}
+          EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          ORAS_REGISTRY_CONFIG: ${{ runner.temp }}/oras-auth.json
+        run: bash .pth-checks/scripts/pact/oci-push.sh ${TAG:+--tag "$TAG"} "$PACKAGE" pacts "$GITHUB_SHA"
+
+      - name: Remove the registry credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/oras-auth.json"

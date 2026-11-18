@@ -36,7 +36,7 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -s sh hooks/*.sh
-          shellcheck -s bash scripts/*.sh scripts/fixtures/*/bin/*
+          shellcheck -s bash scripts/*.sh scripts/pact/*.sh scripts/fixtures/*/bin/*
 
       - name: Python script tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py'

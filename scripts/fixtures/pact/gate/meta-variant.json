@@ -1,0 +1,14 @@
+{
+  "consumer": { "name": "consumer-a" },
+  "provider": { "name": "provider-b" },
+  "interactions": [
+    {
+      "description": "the same call, worded differently",
+      "comments": { "text": ["note"] },
+      "pending": true,
+      "providerStates": [{ "name": "thing 1 exists" }],
+      "request": { "method": "GET", "path": "/things/1" },
+      "response": { "status": 200, "body": { "id": 1 } }
+    }
+  ]
+}
