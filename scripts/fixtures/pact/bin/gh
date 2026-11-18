@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Stub for `gh`, used by scripts/test-pact.sh. Logs argv to $FAKE_GH_LOG and, for the
+# repository lookup, prints $FAKE_GH_DEFAULT_BRANCH (what `--jq .default_branch` would give).
+echo "$*" >> "${FAKE_GH_LOG:?}"
+case " $* " in
+  *" api repos/"*) echo "${FAKE_GH_DEFAULT_BRANCH:-}" ;;
+  *) echo "stub gh: unrecognised call: $*" >&2; exit 1 ;;
+esac
