@@ -42,7 +42,7 @@ on:
       checks-ref:
         description: Tag of PlantechHubDev/.github whose scripts the Coverage step uses (coverage-ratchet.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
         type: string
-        default: v2.2.0
+        default: v2.3.0
     secrets:
       PUBLISH_TOKEN:
         description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
