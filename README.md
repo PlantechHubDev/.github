@@ -223,3 +223,5 @@ What a caller needs, by name only: org or repo variables `vars.ECR_PUSH_ROLE_ARN
 2. After the merge, tag the merge commit with an annotated semver tag: `git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha>` and push it. A breaking change to inputs, job names or the commit standard is a major version.
 3. Adopt the tag one repo at a time, starting with platform-tests, by a PR in that repo that changes all three pins together: the `uses: ...checks.yml@vX.Y.Z` line, `checks-ref: vX.Y.Z`, and `rev: vX.Y.Z` in `.pre-commit-config.yaml`. Then run `pre-commit install` again in each clone if the hook types changed.
 4. Never move or delete a published tag; callers pin it.
+
+From v2.4.0, `checks-ref` MUST equal the `uses` tag in every caller, because `secret-scan` (like `commit-lint`) now runs scripts read at `checks-ref` (`scripts/event-range.sh`), and `pth-sim` refuses a `checks-ref` that is not a release tag.
