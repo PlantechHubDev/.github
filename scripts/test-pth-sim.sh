@@ -11,7 +11,7 @@ export PATH="$BIN:$PATH"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export AWS_LOG=$T/aws.log GH_LOG=$T/gh.log PT_LOG=$T/pt.log NPM_LOG=$T/npm.log STACK_LOG=$T/stack.log
 export PT_REF=$BIN/pt-ref PTH_STACK_LIB=$BIN/pth-stack GITHUB_STEP_SUMMARY=$T/summary.md
-unset FAKE_SSO FAKE_TAGS FAKE_GH_EXIT FAKE_DEPLOYED_2 FAKE_TEST_EXIT FAKE_UP_EXIT FAKE_STACK_BUSY FAKE_STACK_REFUSE PT_EXIT PT_ERR
+unset FAKE_SSO FAKE_SSO_FROM FAKE_URI FAKE_TAGS FAKE_GH_EXIT FAKE_DEPLOYED_2 FAKE_TEST_EXIT FAKE_TEST_SLEEP FAKE_UP_EXIT FAKE_CI_EXIT FAKE_STACK_BUSY FAKE_STACK_REFUSE PT_EXIT PT_ERR
 unset PTH_STACK PTH_STACK_LOCK
 
 # A local platform-tests "origin" and its clone at $DEV/platform-tests; pt-ref names its commit.
@@ -47,6 +47,7 @@ last()   { local l; l=$(printf '%s\n' "$out" | tail -n 1); if [ "$l" = "$2" ]; t
 # --- usage (64)
 run "usage: empty digest exits 64" 64 $SVC "" "$QSHA"
 has "usage: empty digest says why" "digest must be sha256:"
+last "usage: RESULT 64 is the last line" "RESULT 64"
 run "usage: short digest exits 64" 64 $SVC "sha256:abc" "$QSHA"
 run "usage: missing queue sha exits 64" 64 $SVC "$Q"
 run "usage: bad queue sha exits 64" 64 $SVC "$Q" "1234567"
@@ -89,22 +90,38 @@ PT_EXIT=2 PT_ERR="pt-ref: 2 paired platform-tests PRs in $DEPLOYED..$QSHA: platf
   run "two paired PRs exit 3" 3 $SVC "$Q" "$QSHA"
 has "two paired: names the first PR" "platform-tests#11"
 has "two paired: names the second PR" "platform-tests#12"
+last "two paired: RESULT 3 is the last line" "RESULT 3"
 empty "two paired: no npm call" "$NPM_LOG"
 empty "two paired: no stack taken" "$STACK_LOG"
 PT_EXIT=2 PT_ERR="pt-ref: GraphQL error" run "other pt-ref error exits 2" 2 $SVC "$Q" "$QSHA"
 empty "pt-ref error: no npm call (no fallback to master)" "$NPM_LOG"
+last "pt-ref error: RESULT 2 is the last line" "RESULT 2"
 PT_EXIT=0 PT_OUT="" run "pt-ref prints nothing: exit 2" 2 $SVC "$Q" "$QSHA"
 
 # --- expired SSO (4): before npm and the lock
 FAKE_SSO=expired run "SSO expired exits 4" 4 $SVC "$Q" "$QSHA"
 has "SSO expired: plain message" "SSO session expired: run aws sso login"
+last "SSO expired: RESULT 4 is the last line" "RESULT 4"
 empty "SSO expired: no npm call" "$NPM_LOG"
 empty "SSO expired: no stack taken" "$STACK_LOG"
 empty "SSO expired: no pt-ref call" "$PT_LOG"
+FAKE_SSO=missing run "SSO missing credentials exits 4" 4 $SVC "$Q" "$QSHA"
+has "SSO missing: plain message" "SSO session expired: run aws sso login"
+empty "SSO missing: no npm call" "$NPM_LOG"
+
+# --- SSO expires while waiting for the stack: re-checked after the lease, exit 4, lease released
+FAKE_SSO_FROM=sts run "SSO expired after the lease exits 4" 4 $SVC "$Q" "$QSHA"
+logs "SSO after lease: identity re-checked" "$AWS_LOG" "sts get-caller-identity"
+nologs "SSO after lease: env:up never ran" "$NPM_LOG" "env:up"
+logs "SSO after lease: stack released" "$STACK_LOG" "released"
+has "SSO after lease: plain message" "SSO session expired: run aws sso login"
+last "SSO after lease: RESULT 4 is the last line" "RESULT 4"
+FAKE_SSO_FROM=sts-missing run "no credentials after the lease exits 4" 4 $SVC "$Q" "$QSHA"
 
 # --- wrong or stale digests (2)
 FAKE_QUEUE=sha256:$(printf 'f%.0s' $(seq 64)) run "queue digest not in this service's ECR exits 2" 2 $SVC "$Q" "$QSHA"
 has "queue digest unknown: names the service" "not an image in $SVC"
+last "queue digest unknown: RESULT 2 is the last line" "RESULT 2"
 empty "queue digest unknown: no npm call" "$NPM_LOG"
 FAKE_DEPLOYED_2=sha256:$(printf 'e%.0s' $(seq 64)) run "prod mid-deploy (two digests) exits 2" 2 $SVC "$Q" "$QSHA"
 has "mid-deploy: says so" "different digests"
@@ -117,4 +134,29 @@ has "busy pool: says it is waiting" "waiting for a pth-test stack"
 nologs "busy pool: env:up never ran" "$NPM_LOG" "env:up"
 FAKE_STACK_REFUSE=1 run "per-session refusal exits 2" 2 $SVC "$Q" "$QSHA"
 empty "refusal: no npm call" "$NPM_LOG"
+last "refusal: RESULT 2 is the last line" "RESULT 2"
+
+# --- registry URI shape
+FAKE_URI="registry.example/orchestration-service extra" run "malformed repository URI exits 2" 2 $SVC "$Q" "$QSHA"
+empty "bad URI: no npm call" "$NPM_LOG"
+FAKE_URI="" run "empty repository URI exits 2" 2 $SVC "$Q" "$QSHA"
+
+# --- setup failures after the lease (2), lease released
+FAKE_CI_EXIT=1 run "npm ci failure exits 2" 2 $SVC "$Q" "$QSHA"
+nologs "npm ci failure: env:up never ran" "$NPM_LOG" "env:up"
+logs "npm ci failure: stack released" "$STACK_LOG" "released"
+last "npm ci failure: RESULT 2 is the last line" "RESULT 2"
+PT_OUT="$(printf '9%.0s' $(seq 40)) master" run "worktree checkout failure exits 2" 2 $SVC "$Q" "$QSHA"
+nologs "checkout failure: npm never ran" "$NPM_LOG" "| ci"
+last "checkout failure: RESULT 2 is the last line" "RESULT 2"
+
+# --- a job cancel or timeout (SIGTERM) releases the lease through the library's traps
+: > "$NPM_LOG"; : > "$STACK_LOG"; : > "$GITHUB_STEP_SUMMARY"
+FAKE_TEST_SLEEP=30 bash "$HERE/pth-sim.sh" $SVC "$Q" "$QSHA" > "$T/term.out" 2>&1 & spid=$!
+for _ in $(seq 100); do grep -qF '| test' "$NPM_LOG" && break; sleep 0.1; done
+kill -TERM "$spid"; wait "$spid"; code=$?; out=$(cat "$T/term.out")
+if [ "$code" != 0 ]; then pass "SIGTERM: exits non-zero"; else fail "SIGTERM: exits non-zero" "exit 0; output: $out"; fi
+logs "SIGTERM: stack released" "$STACK_LOG" "released"
+logs "SIGTERM: env:down ran" "$NPM_LOG" "run env:down"
+last "SIGTERM: RESULT is the last line" "RESULT 143"
 exit $status

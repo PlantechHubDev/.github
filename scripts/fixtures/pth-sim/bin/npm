@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Fake npm for test-pth-sim.sh. Logs "<cwd> | <argv>" (one line) to $NPM_LOG.
-# `npm test ...` exits $FAKE_TEST_EXIT (default 0); `npm run env:up ...` exits $FAKE_UP_EXIT
+# `npm test ...` exits $FAKE_TEST_EXIT (default 0), or with FAKE_TEST_SLEEP set becomes
+# `sleep $FAKE_TEST_SLEEP` (a long test run to signal); `npm ci` exits $FAKE_CI_EXIT (default 0); `npm run env:up ...` exits $FAKE_UP_EXIT
 # (default 0); everything else (ci, env:down) exits 0. Prints a line on stdout so a test can
 # see whether cleanup output lands after RESULT.
 echo "$PWD | $*" >> "${NPM_LOG:?}"
 echo "fake npm $*"
 case "$1 ${2:-}" in
-  "test "*) exit "${FAKE_TEST_EXIT:-0}" ;;
+  "test "*) if [ -n "${FAKE_TEST_SLEEP:-}" ]; then exec sleep "$FAKE_TEST_SLEEP"; fi; exit "${FAKE_TEST_EXIT:-0}" ;;
+  "ci "*) exit "${FAKE_CI_EXIT:-0}" ;;
   "run env:up") exit "${FAKE_UP_EXIT:-0}" ;;
 esac
 exit 0

@@ -20,7 +20,10 @@
 #      for a non-interactive run: pt-ref's commit comes from step 4 (not --here); a busy pool is
 #      announced ("waiting for a pth-test stack") before the blocking take; RESULT is printed by
 #      this script after the block's subshell has exited, so it comes after the env:down cleanup
-#      and stays the last line of the log.
+#      and stays the last line of the log; after the lease, `aws sts get-caller-identity`
+#      re-checks the SSO session (it may expire during a long wait) and ends the run with exit 4;
+#      the block runs in the background so INT/TERM/HUP (job cancel or timeout) are forwarded
+#      to it and the library's traps release the lease.
 #   6. A markdown summary to $GITHUB_STEP_SUMMARY (service, queue sha, deployed sha,
 #      platform-tests commit, result).
 #
@@ -108,7 +111,7 @@ aws ecr describe-images --repository-name "$svc" --image-ids "imageDigest=$diges
        finish 2 "queue digest $digest is not an image in $svc's ECR repository: $(head -n 1 "$err")" "resolver error"; }
 awsj ecr describe-repositories --repository-names "$svc"
 uri=$(jq -r '.repositories[0].repositoryUri // empty' <<<"$J")
-[ -n "$uri" ] || finish 2 "no ECR repository URI for $svc" "resolver error"
+[[ $uri =~ ^[a-z0-9.-]+/[a-z0-9._-]+$ ]] || finish 2 "ECR repository URI for $svc is missing or malformed (got '$uri')" "resolver error"
 
 # --- 3. the commit prod runs
 deployed=$(bash "$HERE/deployed-sha.sh" "$svc" "$running"); rc=$?
@@ -143,7 +146,11 @@ export PTH_PT_REF="$ptref"
 pth_stack_try; t=$?
 if [ "$t" = 75 ]; then echo "pth-sim: waiting for a pth-test stack (all busy); the job's timeout bounds the wait"; pth_stack_take
 elif [ "$t" != 0 ]; then exit "$t"; fi
-echo "pth-sim: leased pth-test stack ${PTH_STACK:-1}"
+# The SSO session may have expired while the run waited for a stack: re-check before env:up.
+if ! aws sts get-caller-identity --output json >/dev/null 2>"$err"; then
+  if grep -Eqi -- "$SSO_ERRORS" "$err"; then : > "$state/sso"; exit 4; fi
+  echo "pth-sim: aws sts get-caller-identity failed: $(head -n 1 "$err")" >&2; exit 2
+fi
 pth_stack_phase prepare
 # shellcheck disable=SC2155  # verbatim from the block
 export DOCKER_CONFIG="$(mktemp -d)" DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
@@ -154,8 +161,19 @@ git -C "${DEV}/platform-tests" fetch -q origin && { [ -e "$PT/.git" ] || git -C 
 : > "$state/ran"
 pth_stack_phase env_up; up=1; npm run env:up -- --portal --prod-fleet --image "${short}=${uri}@${digest}" && { pth_stack_phase tests; npm test -- --allow-non-master; }; rc=$?
 pth_stack_exit $rc
-)
-rc=$?
+) &
+# A job cancel or timeout signals this script: pass it on so the library's traps release the
+# lease. bash runs a trapped signal only once its foreground child returns, so the subshell's
+# direct children (npm) get the TERM too. The subshell is signalled first, so its trap is already
+# pending when the child dies and runs before the block's normal exit path.
+pid=$!
+trap 'kill -TERM "$pid" 2>/dev/null; pkill -TERM -P "$pid" 2>/dev/null; wait "$pid"' INT TERM HUP
+wait "$pid"; rc=$?
+trap - INT TERM HUP
+if [ -e "$state/sso" ]; then
+  rm -rf "$state"
+  finish 4 "SSO session expired: run aws sso login --profile $AWS_PROFILE (it expired while the run waited for a stack)" "AWS SSO expired"
+fi
 if [ ! -e "$state/ran" ]; then
   rm -rf "$state"
   finish 2 "the run did not start (pth-test stack refused or never free, or the platform-tests worktree / npm ci failed; exit $rc)" "setup error (exit $rc)"
