@@ -1,0 +1,92 @@
+# Publish a consumer repo's contract (Pact) files to GHCR. Called from the repo's publish.yml,
+# after java-service-publish.yml has uploaded the `pacts` artifact:
+#
+#   pacts:
+#     needs: publish
+#     uses: PlantechHubDev/.github/.github/workflows/pact-publish.yml@vX.Y.Z
+#     permissions:
+#       contents: read
+#       packages: write
+#     with:
+#       package: pacts-consumer-a
+#
+# Job publish: downloads the artifact (a notice and no push when it is absent), then on the
+# default branch pushes the *.json files to ghcr.io/plantechhubdev/<package> tagged `default`
+# and `sha-<7>`. Other branches only print a notice. The package needs a "Manage Actions access"
+# grant for the consumer repo (Write), and one for each provider repo (Read).
+
+name: pact-publish
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: GHCR package name for this repo's contracts, e.g. pacts-consumer-a.
+        type: string
+        required: true
+      checks-ref:
+        description: Tag of PlantechHubDev/.github whose scripts to use. A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
+        type: string
+        default: v2.3.0
+      artifact:
+        description: Name of the artifact holding the *.json contract files.
+        type: string
+        default: pacts
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check the inputs
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          printf '%s' "$PACKAGE" | grep -Eq '^[a-z0-9][a-z0-9._-]*$' || { echo "::error::package must be lower-case letters, digits, dots, dashes and underscores (got '$PACKAGE')"; exit 1; }
+
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      - name: Download the contract files
+        id: download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: ${{ inputs.artifact }}
+          path: pacts
+
+      - name: Install oras
+        if: steps.download.outcome == 'success'
+        run: bash .pth-checks/scripts/pact/install-oras.sh
+
+      - name: Log in to GHCR
+        if: steps.download.outcome == 'success'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: printf %s "$TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push the contract files
+        if: steps.download.outcome == 'success'
+        env:
+          PACKAGE: ${{ inputs.package }}
+          EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .pth-checks/scripts/pact/oci-push.sh "$PACKAGE" pacts "$GITHUB_SHA"
+
+      - name: Nothing to publish
+        if: steps.download.outcome != 'success'
+        env:
+          ARTIFACT: ${{ inputs.artifact }}
+        run: echo "::notice::No '$ARTIFACT' artifact in this run; no contracts to publish"

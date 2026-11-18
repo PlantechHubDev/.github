@@ -9,6 +9,7 @@
 #     with:
 #       service: calc-service
 #       mysql-test-image: ghcr.io/plantechhubdev/pth-mysql-test:<tag>   # only if the tests use it
+#       pact-fetch-consumers: pacts-consumer-a pacts-consumer-b          # only to verify consumer contracts
 #     secrets:
 #       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
 #
@@ -42,7 +43,11 @@ on:
       checks-ref:
         description: Tag of PlantechHubDev/.github whose scripts the Coverage step uses (coverage-ratchet.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
         type: string
-        default: v2.2.0
+        default: v2.3.0
+      pact-fetch-consumers:
+        description: Space-separated GHCR package names of consumer contracts (Pact files) this service, as provider, must verify, e.g. "pacts-consumer-a pacts-consumer-b". Each is pulled from its `default` tag into $RUNNER_TEMP/pacts before the build, and PACT_FOLDER points there. Empty (the default) fetches nothing. A package that is unpublished, or has no Actions access grant for this repo, is skipped with a notice.
+        type: string
+        default: ''
     secrets:
       PUBLISH_TOKEN:
         description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
@@ -111,6 +116,29 @@ jobs:
         run: |
           timeout 120 docker pull "$IMAGE" || { echo "::error::Cannot pull $IMAGE. It must be published by plantechhubdev/platform-tests (publish-mysql-test workflow), and its package settings (Manage Actions access) must give this repo Read. See platform-tests docs/testing-strategy.md (merge prerequisites)."; exit 1; }
           echo "PTH_MYSQL_TEST_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Check out the shared scripts for the pact fetch
+        if: inputs.pact-fetch-consumers != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks-pact
+          persist-credentials: false
+
+      - name: Fetch consumer contracts
+        if: inputs.pact-fetch-consumers != ''
+        env:
+          CONSUMERS: ${{ inputs.pact-fetch-consumers }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          bash .pth-checks-pact/scripts/pact/install-oras.sh
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          printf %s "$TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # shellcheck disable=SC2086  # CONSUMERS is a space-separated list of package names
+          bash .pth-checks-pact/scripts/pact/oci-pull.sh "$RUNNER_TEMP/pacts" $CONSUMERS
+          echo "PACT_FOLDER=$RUNNER_TEMP/pacts" >> "$GITHUB_ENV"
 
       - name: Build with Gradle
         env:
