@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests ecr-retag.sh (copy the manifest of <service>:<from-tag> to <to-tag>, no rebuild) and
-# release-image.sh (retag sha-<7> as master only when prod does not pin :master) with the fake aws in scripts/fixtures/deploy-pr/bin first on PATH, so nothing touches AWS.
+# release-image.sh (guard: the running prod service deploys <service>:master, else exit 3; then retag sha-<7> as master) with fake aws (scripts/fixtures/deploy-pr/bin, and fixtures/ecs-deploy/bin for the guard) first on PATH, so nothing touches AWS.
 # Usage: bash scripts/test-ecr-retag.sh   (exit 0 when every case passes)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -55,68 +55,81 @@ run "usage: bad service" 64 "Orch/x" sha-abc1234 master
 run "usage: bad tag" 64 $SVC "sha abc" master
 empty "usage: no aws call" "$AWS_LOG"
 
-# --- release-image.sh <service> <merge-sha> < pins: the digest to deploy, retagging only when no
-# prod unit (any region) pins :master or fails to parse. Pins on stdin: "<path> <pin>" per unit,
-# as `open-deploy-pr.sh --pins` prints them.
+# --- release-image.sh <service> <merge-sha> <cluster> <ecs-service>: the guard, then the retag.
+# The guard reads what the running prod service deploys (describe-services -> its task
+# definition): the container whose image is in the service's ECR repository MUST reference
+# <anything>/<service>:master, because the release deploys by retagging :master and forcing a new
+# deployment. A digest, another tag, or no container of the service's repository exits 3 naming
+# the image, with no AWS write. Uses the ECS fake (fixtures/ecs-deploy/bin), which hands ECR
+# calls to the deploy-pr fake.
 MERGE=abc1234$(printf '0%.0s' $(seq 33))
-export GITHUB_OUTPUT=$T/output
-EAST=live/region-a/prod/$SVC/terragrunt.hcl
-WEST=live/region-b/prod/$SVC/terragrunt.hcl
-# rel <name> <want-exit> <pins> <args...>
+export GITHUB_OUTPUT=$T/output FAKE_STATE=$T
+CL=example-cluster SV=example-service-prod
+unset FAKE_TD FAKE_FAIL_OP
+B=sha256:$(printf 'b%.0s' $(seq 64))
+# rel <name> <want-exit> <args...>
 rel() {
-  local name=$1 want=$2 pins=$3; shift 3
+  local name=$1 want=$2; shift 2
   : > "$AWS_LOG"; : > "$GITHUB_OUTPUT"
-  out=$(printf '%s' "$pins" | bash "$HERE/release-image.sh" "$@" 2>"$T/err"); code=$?; err=$(cat "$T/err")
+  out=$(PATH="$HERE/fixtures/ecs-deploy/bin:$PATH" bash "$HERE/release-image.sh" "$@" 2>"$T/err"); code=$?; err=$(cat "$T/err")
   if [ "$code" = "$want" ]; then pass "$name"; else fail "$name" "exit $code want $want; stdout '$out' stderr '$err'"; fi
 }
 hasnt() { if [[ $2 == *"$3"* ]]; then fail "$1" "has '$3': $2"; else pass "$1"; fi; }
+writes() { if grep -qE 'put-image|update-service|register-task-definition' "$2"; then fail "$1" "AWS write: $(cat "$2")"; else pass "$1"; fi; }
+SIDE='log-router registry.example.test/log-router:stable - -'
+td() { printf 'app %s /example/log-group ecs\n%s\n' "$1" "$SIDE"; }
 
-FAKE_TAG_DIGEST=$A rel "east master pin: exits 0" 0 "$EAST tag:master"$'\n' $SVC "$MERGE"
-nologs "east master pin: :master not moved (no put-image)" "$AWS_LOG" "put-image"
-logs "east master pin: sha-<7> digest read read-only" "$AWS_LOG" "ecr describe-images --repository-name $SVC --image-ids imageTag=sha-abc1234"
-has  "east master pin: warns" "$out" "::warning::"
-has  "east master pin: warning names the unit" "$out" "$EAST"
-is   "east master pin: digest is the last line" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
-logs "east master pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "east master pin: retagged=false in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "retagged=false"
-logs "east master pin: held-by names the unit in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "held-by=$EAST"
+rel "service on :master: exits 0" 0 $SVC "$MERGE" $CL $SV
+logs "service on :master: reads the service" "$AWS_LOG" "ecs describe-services --cluster $CL --services $SV"
+logs "service on :master: reads its task definition" "$AWS_LOG" "ecs describe-task-definition --task-definition td/example-service:7"
+logs "service on :master: retagged sha-<7> as master" "$AWS_LOG" "ecr put-image --repository-name $SVC --image-tag master"
+logs "service on :master: from sha-<7>" "$AWS_LOG" "ecr batch-get-image --repository-name $SVC --image-ids imageTag=sha-abc1234"
+is   "service on :master: digest is the last line" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
+logs "service on :master: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
+hasnt "service on :master: no warning or error" "$out$err" "::"
+# The previous digest (for the deployment comment) is what :master named before the retag.
+FAKE_TAG_DIGEST=$B rel "previous :master: exits 0" 0 $SVC "$MERGE" $CL $SV
+logs "previous :master: previous-digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "previous-digest=$B"
+is   "previous :master: read before the retag" "$(grep -oE 'imageTag=master|put-image' "$AWS_LOG" | tr '\n' ,)" "imageTag=master,put-image,"
+rel "no :master yet: exits 0" 0 $SVC "$MERGE" $CL $SV
+logs "no :master yet: previous-digest empty" "$GITHUB_OUTPUT" "previous-digest="
+nologs "no :master yet: no previous digest named" "$GITHUB_OUTPUT" "previous-digest=sha256"
+FAKE_TAG_DIGEST=$A FAKE_PUT_ERR=ImageAlreadyExistsException rel ":master already the new image (re-run): exits 0" 0 $SVC "$MERGE" $CL $SV
+nologs "re-run: previous digest unknown, not the image itself" "$GITHUB_OUTPUT" "previous-digest=$A"
+logs "re-run: previous-digest empty" "$GITHUB_OUTPUT" "previous-digest="
+FAKE_FAIL_OP=describe-images rel "cannot read :master: exits 1" 1 $SVC "$MERGE" $CL $SV
+writes "cannot read :master: no AWS write" "$AWS_LOG"
+FAKE_TD=$(td "other.registry.test/team/$SVC:master") rel "any registry path to <service>:master: exits 0" 0 $SVC "$MERGE" $CL $SV
+logs "any registry path: retagged" "$AWS_LOG" "put-image"
 
-FAKE_TAG_DIGEST=$A rel "DR master pin: exits 0" 0 "$EAST digest"$'\n'"$WEST tag:master"$'\n' $SVC "$MERGE"
-nologs "DR master pin: :master not moved (no put-image)" "$AWS_LOG" "put-image"
-has  "DR master pin: warning names the region-b unit" "$out" "::warning::"
-has  "DR master pin: names $WEST" "$out" "$WEST"
-hasnt "DR master pin: does not blame the digest-pinned unit" "$out" "$EAST"
-logs "DR master pin: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "DR master pin: held-by names only the region-b unit" "$GITHUB_OUTPUT" "held-by=$WEST"
+FAKE_TD=$(td "registry.example.test/$SVC@$A") rel "digest-pinned image: exits 3" 3 $SVC "$MERGE" $CL $SV
+has  "digest-pinned image: names the image" "$out$err" "registry.example.test/$SVC@$A"
+writes "digest-pinned image: no AWS write (no put-image, no update-service)" "$AWS_LOG"
+nologs "digest-pinned image: no ECR call" "$AWS_LOG" "ecr "
+nologs "digest-pinned image: no digest output" "$GITHUB_OUTPUT" "digest="
+FAKE_TD=$(td "registry.example.test/$SVC:latest") rel "other tag: exits 3" 3 $SVC "$MERGE" $CL $SV
+has  "other tag: names the image" "$out$err" "registry.example.test/$SVC:latest"
+writes "other tag: no AWS write" "$AWS_LOG"
+FAKE_TD=$(td "registry.example.test/$SVC") rel "no tag (implicit latest): exits 3" 3 $SVC "$MERGE" $CL $SV
+FAKE_TD=$(td "registry.example.test/$SVC-extra:master") rel "only another repository's image: exits 3" 3 $SVC "$MERGE" $CL $SV
+has  "another repository: says no container runs the service's repository" "$out$err" "no container"
+writes "another repository: no AWS write" "$AWS_LOG"
+FAKE_TD=$(td "registry.example.test/$SVC:master"; echo "worker registry.example.test/$SVC:latest - -") rel "two containers of the repository, one not on :master: exits 3" 3 $SVC "$MERGE" $CL $SV
+has  "two containers: names the one not on :master" "$out$err" "$SVC:latest"
+FAKE_FAIL_OP=describe-services rel "cannot read the service: exits 1" 1 $SVC "$MERGE" $CL $SV
+writes "cannot read the service: no AWS write" "$AWS_LOG"
+FAKE_FAIL_OP=describe-task-definition rel "cannot read the task definition: exits 1" 1 $SVC "$MERGE" $CL $SV
+writes "cannot read the task definition: no AWS write" "$AWS_LOG"
 
-FAKE_TAG_DIGEST=$A rel "DR unparseable: exits 0" 0 "$EAST digest"$'\n'"$WEST unparseable"$'\n' $SVC "$MERGE"
-nologs "DR unparseable: no retag (fails closed)" "$AWS_LOG" "put-image"
-has  "DR unparseable: warning names the unit" "$out" "$WEST"
-FAKE_TAG_DIGEST=$A rel "garbled pin line: exits 0" 0 "$EAST digest"$'\n'"$WEST"$'\n' $SVC "$MERGE"
-nologs "garbled pin line: no retag" "$AWS_LOG" "put-image"
-FAKE_TAG_DIGEST=$A rel "no pins at all: exits 0" 0 "" $SVC "$MERGE"
-nologs "no pins at all: no retag (fails closed)" "$AWS_LOG" "put-image"
-has  "no pins at all: warns" "$out" "::warning::"
-logs "no pins at all: retagged=false" "$GITHUB_OUTPUT" "retagged=false"
-
-rel "all digest pins: exits 0" 0 "$EAST digest"$'\n'"$WEST digest"$'\n' $SVC "$MERGE"
-logs "all digest pins: retagged sha-<7> as master" "$AWS_LOG" "ecr put-image --repository-name $SVC --image-tag master"
-logs "all digest pins: digest in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "digest=$A"
-logs "all digest pins: retagged=true in GITHUB_OUTPUT" "$GITHUB_OUTPUT" "retagged=true"
-logs "all digest pins: held-by empty" "$GITHUB_OUTPUT" "held-by="
-nologs "all digest pins: no retagged=false" "$GITHUB_OUTPUT" "retagged=false"
-hasnt "all digest pins: no warning" "$out" "::warning::"
-rel "other tag pin: exits 0" 0 "$EAST tag:latest"$'\n'"$WEST digest"$'\n' $SVC "$MERGE"
-logs "other tag pin: retagged" "$AWS_LOG" "put-image"
-
-rel "east master pin, sha-<7> missing: exits 2" 2 "$EAST tag:master"$'\n' $SVC "$MERGE"
-has "east master pin, missing: says so" "$err" "sha-abc1234"
-nologs "east master pin, missing: no digest output" "$GITHUB_OUTPUT" "digest="
-FAKE_SRC_MISSING=1 rel "digest pins, sha-<7> missing: exits 2" 2 "$EAST digest"$'\n' $SVC "$MERGE"
-nologs "digest pins, missing: no put-image" "$AWS_LOG" "put-image"
-nologs "digest pins, missing: no digest output" "$GITHUB_OUTPUT" "digest="
-nologs "digest pins, missing: no retagged output" "$GITHUB_OUTPUT" "retagged="
-rel "usage: extra arg" 64 "" $SVC "$MERGE" digest
-rel "usage: short sha" 64 "" $SVC abc1234
-rel "usage: no args" 64 ""
+FAKE_SRC_MISSING=1 rel "sha-<7> missing: exits 2" 2 $SVC "$MERGE" $CL $SV
+has "sha-<7> missing: says so" "$err" "sha-abc1234"
+nologs "sha-<7> missing: no put-image" "$AWS_LOG" "put-image"
+nologs "sha-<7> missing: no digest output" "$GITHUB_OUTPUT" "digest="
+FAKE_PUT_ERR=ImageAlreadyExistsException rel "re-run (master already on sha-<7>): exits 0" 0 $SVC "$MERGE" $CL $SV
+is "re-run: prints the digest" "$(printf '%s\n' "$out" | tail -n 1)" "$A"
+rel "usage: three args" 64 $SVC "$MERGE" $CL
+rel "usage: short sha" 64 $SVC abc1234 $CL $SV
+rel "usage: bad cluster" 64 $SVC "$MERGE" "a cluster" $SV
+rel "usage: no args" 64
+empty "usage: no aws call" "$AWS_LOG"
 exit $status

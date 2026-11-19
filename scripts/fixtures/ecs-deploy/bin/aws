@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Fake aws for test-ecs-deploy.sh and the release-image.sh cases of test-ecr-retag.sh. Logs argv
+# (one line) to $AWS_LOG. Every call reads the environment:
+#   ecs list-tasks / describe-tasks  the running tasks: $FAKE_TASKS, or $FAKE_PREV_TASKS (default
+#       $FAKE_TASKS) until update-service has run (marker file $FAKE_STATE/updated); with
+#       --desired-status STOPPED, $FAKE_STOPPED_TASKS. One task per line, "<task-id> <app digest>
+#       [<sidecar digest>|-] [<startedBy>|-] [nostart]" (startedBy default ecs-svc/primary, the
+#       PRIMARY deployment's id; "nostart": a task whose containers never started, so no startedAt
+#       and no container runtimeId): container "app" runs registry.example.test/example-service:master,
+#       container "log-router" log-router:stable. describe-tasks returns only the --tasks asked for.
+#   ecs update-service               writes the marker; fails when FAKE_UPDATE_ERR names an exception
+#   ecs wait services-stable         exit 255 (waiter failed) when FAKE_WAIT_FAIL=1
+#   ecs describe-services            taskDefinition td/example-service:7 and one PRIMARY deployment
+#       ecs-svc/primary, rolloutState $FAKE_ROLLOUT (default COMPLETED); runningCount
+#       $FAKE_RUNNING (default 2), desiredCount $FAKE_DESIRED (default 2)
+#   ecs describe-task-definition     containerDefinitions from $FAKE_TD, one per line
+#       "<name> <image> <awslogs-group|-> <awslogs-stream-prefix|->" ("-" group: no logConfiguration)
+#       (default: app on example-service:master logging to /example/log-group with prefix ecs, and
+#       log-router on log-router:stable logging nowhere)
+#   ecr batch-get-image imageDigest= the image index of that digest, with child manifests
+#       $FAKE_CHILDREN (space-separated digests); a failures entry when FAKE_INDEX_MISSING=1
+#   ecr (anything else)              the deploy-pr fake (same log)
+#   logs filter-log-events           $FAKE_LOG_EVENTS lines "<epoch-ms> <stream> <message>", keeping
+#       those at or after --start-time, in --log-stream-names, whose message contains --filter-pattern
+#   cloudwatch describe-alarms       $FAKE_ALARMS, space-separated "<name>:<state>", filtered by
+#       --alarm-name-prefix and --state-value when given
+# FAKE_FAIL_OP=<operation> (e.g. describe-services) makes that operation fail with
+# AccessDeniedException; FAKE_AWS_DENIED=1 makes every call fail.
+if [ "${1-}" = ecr ] && [ "${FAKE_FAIL_OP:-}" = "${2-}" ]; then
+  echo "$*" >> "${AWS_LOG:-/dev/null}"
+  echo "An error occurred (AccessDeniedException) when calling the $2 operation: denied" >&2; exit 254
+fi
+if [ "${1-}" = ecr ] && [[ "$*" != *"batch-get-image"*"imageDigest="* ]]; then
+  exec bash "$(dirname "$0")/../../deploy-pr/bin/aws" "$@"
+fi
+echo "$*" >> "${AWS_LOG:-/dev/null}"
+op=$2
+[ "$1" = ecs ] && [ "$2" = wait ] && op="wait $3"
+if [ -n "${FAKE_AWS_DENIED:-}" ] || [ "${FAKE_FAIL_OP:-}" = "$op" ]; then
+  echo "An error occurred (AccessDeniedException) when calling the $op operation: denied" >&2; exit 254
+fi
+arg() {
+  local want=$1 prev='' a; shift
+  for a in "$@"; do
+    if [ "$prev" = "$want" ]; then echo "$a"; return; fi
+    case $a in "$want="*) echo "${a#"$want="}"; return ;; esac
+    prev=$a
+  done
+}
+# list_after <flag> <args...>: the values after <flag> up to the next --option.
+list_after() {
+  local want=$1 on=0 a; shift
+  for a in "$@"; do
+    if [ "$on" = 1 ]; then case $a in --*) return ;; *) echo "$a" ;; esac; fi
+    [ "$a" = "$want" ] && on=1
+  done
+}
+tasks() {
+  if [ -e "${FAKE_STATE:?}/updated" ]; then printf '%s\n' "${FAKE_TASKS-}"; else printf '%s\n' "${FAKE_PREV_TASKS-${FAKE_TASKS-}}"; fi
+}
+TD_DEFAULT='app registry.example.test/example-service:master /example/log-group ecs
+log-router registry.example.test/log-router:stable - -'
+case "$1 $op" in
+  "ecs list-tasks")
+    if [ "$(arg --desired-status "$@")" = STOPPED ]; then printf '%s\n' "${FAKE_STOPPED_TASKS-}"; else tasks; fi \
+      | awk 'NF { print "task/example-cluster/" $1 }' | jq -R . | jq -s '{taskArns: .}' ;;
+  "ecs describe-tasks")
+    want=" $(list_after --tasks "$@" | sed 's#.*/##' | tr '\n' ' ')"
+    { tasks | awk 'NF { print "RUNNING", $0 }'; printf '%s\n' "${FAKE_STOPPED_TASKS-}" | awk 'NF { print "STOPPED", $0 }'; } \
+      | while read -r st id d s by ns; do
+      [[ $want == *" $id "* ]] || continue
+      [ "${s:--}" != - ] || s=""
+      [ "${by:--}" != - ] || by=""
+      jq -n --arg id "$id" --arg d "$d" --arg s "$s" --arg by "${by:-ecs-svc/primary}" --arg st "$st" --arg ns "${ns:-}" '{taskArn: ("task/example-cluster/" + $id),
+        lastStatus: $st, startedBy: $by, taskDefinitionArn: "td/example-service:7",
+        containers: ([{name: "app", image: "registry.example.test/example-service:master", imageDigest: $d}]
+          + (if $s == "" then [] else [{name: "log-router", image: "registry.example.test/log-router:stable", imageDigest: $s}] end))}
+        | if $ns == "nostart" then . else .startedAt = "2026-11-18T12:00:01Z" | .containers[] += {runtimeId: ("rt-" + $id)} end'
+    done | jq -s '{tasks: ., failures: []}' ;;
+  "ecs update-service")
+    if [ -n "${FAKE_UPDATE_ERR:-}" ]; then
+      echo "An error occurred ($FAKE_UPDATE_ERR) when calling the UpdateService operation: refused" >&2; exit 254
+    fi
+    : > "${FAKE_STATE:?}/updated"
+    echo '{"service":{"serviceName":"x"}}' ;;
+  "ecs wait services-stable")
+    if [ -n "${FAKE_WAIT_FAIL:-}" ]; then echo "Waiter ServicesStable failed: Max attempts exceeded" >&2; exit 255; fi ;;
+  "ecs describe-services")
+    jq -n --arg r "${FAKE_ROLLOUT:-COMPLETED}" --argjson run "${FAKE_RUNNING:-2}" --argjson want "${FAKE_DESIRED:-2}" \
+      '{services: [{serviceName: "svc", desiredCount: $want, runningCount: $run, taskDefinition: "td/example-service:7",
+        deployments: [{id: "ecs-svc/primary", status: "PRIMARY", taskDefinition: "td/example-service:7", rolloutState: $r,
+          desiredCount: $want, runningCount: $run}]}], failures: []}' ;;
+  "ecs describe-task-definition")
+    printf '%s\n' "${FAKE_TD-$TD_DEFAULT}" | awk 'NF' | while read -r n img g p; do
+      jq -n --arg n "$n" --arg i "$img" --arg g "$g" --arg p "$p" '{name: $n, image: $i}
+        + (if $g == "-" then {} else {logConfiguration: {logDriver: "awslogs",
+            options: ({"awslogs-group": $g, "awslogs-region": "us-east-1"} + (if $p == "-" then {} else {"awslogs-stream-prefix": $p} end))}} end)'
+    done | jq -s '{taskDefinition: {taskDefinitionArn: "td/example-service:7", containerDefinitions: .}}' ;;
+  "ecr batch-get-image")
+    d=$(arg imageDigest "$@")
+    if [ -n "${FAKE_INDEX_MISSING:-}" ]; then
+      echo '{"images":[],"failures":[{"failureCode":"ImageNotFound","failureReason":"Requested image not found"}]}'
+    else
+      m=$(for c in ${FAKE_CHILDREN-}; do jq -n --arg c "$c" '{digest: $c, platform: {os: "linux"}}'; done \
+        | jq -s -c '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: .}')
+      jq -n --arg d "$d" --arg m "$m" '{images: [{imageId: {imageDigest: $d}, imageManifest: $m,
+        imageManifestMediaType: "application/vnd.oci.image.index.v1+json"}], failures: []}'
+    fi ;;
+  "logs filter-log-events")
+    start=$(arg --start-time "$@") pat=$(arg --filter-pattern "$@")
+    streams=" $(list_after --log-stream-names "$@" | tr '\n' ' ')"
+    printf '%s\n' "${FAKE_LOG_EVENTS-}" | awk 'NF' | while read -r ts st msg; do
+      if [ "$ts" -ge "${start:-0}" ] && [[ $msg == *"$pat"* ]] && [[ $streams == *" $st "* ]]; then
+        jq -n --argjson t "$ts" --arg m "$msg" --arg s "$st" '{timestamp: $t, message: $m, logStreamName: $s}'
+      fi
+    done | jq -s '{events: .}' ;;
+  "cloudwatch describe-alarms")
+    prefix=$(arg --alarm-name-prefix "$@") state=$(arg --state-value "$@")
+    for a in ${FAKE_ALARMS-}; do
+      n=${a%%:*} s=${a#*:}
+      [[ $n == "$prefix"* ]] || continue
+      [ -z "$state" ] || [ "$s" = "$state" ] || continue
+      jq -n --arg n "$n" --arg s "$s" '{AlarmName: $n, StateValue: $s}'
+    done | jq -s '{MetricAlarms: ., CompositeAlarms: []}' ;;
+  *) echo "fake aws: unexpected call: $*" >&2; exit 99 ;;
+esac

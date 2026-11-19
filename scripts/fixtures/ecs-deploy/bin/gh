@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Fake gh for test-ecs-deploy.sh. Logs argv (one line) to $GH_LOG. A leading --paginate after
+# `api` is accepted (and logged).
+#   api repos/<repo>/actions/runs/<id>/jobs...  prints $FAKE_JOBS (JSON), then, with --paginate,
+#                                               $FAKE_JOBS_PAGE2 as a second page when set; exits 1
+#                                               when FAKE_JOBS_EXIT=1
+#   api repos/<repo>/actions/runs/<id> ...      prints $FAKE_WORKFLOW_ID (the --jq .workflow_id result),
+#                                               or exits 1 when FAKE_WORKFLOW_ID_EXIT=1
+#   api repos/<repo>/actions/workflows/<id>/runs?...  prints $FAKE_RELEASE_RUNS (JSON; default no
+#                                               runs), or exits 1 when FAKE_RELEASE_RUNS_EXIT=1
+#   api repos/<repo>/actions/runs?...           prints $FAKE_RUNS (JSON), or exits 1 when FAKE_RUNS_EXIT=1
+#   api repos/<repo>/commits/<sha>/pulls        prints $FAKE_PULLS (JSON array; default [])
+#   api repos/<repo>/commits/master ...         prints $FAKE_TIP (the --jq .sha result), or exits
+#                                               1 when FAKE_TIP_EXIT=1
+#   api repos/<org>/<repo>/commits/<ref> ...    prints $FAKE_COMMIT (deployed-sha.sh's --jq .sha result)
+#   api repos/<repo>/issues/<n>/comments        the comments made on <n> so far ($FAKE_STATE/comments-<n>,
+#                                               one JSON object per line), as a JSON array
+#   pr comment <n> --repo R --body B            records B as a comment on <n>; or exits $FAKE_COMMENT_EXIT
+echo "$*" >> "${GH_LOG:-/dev/null}"
+paginate=""
+if [ "${1-}" = api ] && [ "${2-}" = --paginate ]; then paginate=1; set -- api "${@:3}"; fi
+arg() {
+  local want=$1 prev='' a; shift
+  for a in "$@"; do
+    if [ "$prev" = "$want" ]; then echo "$a"; return; fi
+    prev=$a
+  done
+}
+case "$1 $2" in
+  "api repos/"*/actions/runs/*/jobs*)
+    [ "${FAKE_JOBS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    if [ -n "${FAKE_JOBS:-}" ]; then echo "$FAKE_JOBS"; else echo '{"jobs":[]}'; fi
+    [ -z "${FAKE_JOBS_PAGE2:-}" ] || [ -z "$paginate" ] || echo "$FAKE_JOBS_PAGE2" ;;
+  "api repos/"*/actions/runs/[0-9]*)
+    [ "${FAKE_WORKFLOW_ID_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    echo "${FAKE_WORKFLOW_ID:-4242}" ;;
+  "api repos/"*/actions/workflows/*/runs*)
+    [ "${FAKE_RELEASE_RUNS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    if [ -n "${FAKE_RELEASE_RUNS:-}" ]; then echo "$FAKE_RELEASE_RUNS"; else echo '{"workflow_runs":[]}'; fi ;;
+  "api repos/"*/actions/runs*)
+    [ "${FAKE_RUNS_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    if [ -n "${FAKE_RUNS:-}" ]; then echo "$FAKE_RUNS"; else echo '{"workflow_runs":[]}'; fi ;;
+  "api repos/"*/commits/*/pulls*) echo "${FAKE_PULLS:-[]}" ;;
+  "api repos/"*/commits/master*)
+    [ "${FAKE_TIP_EXIT:-0}" = 0 ] || { echo "gh: HTTP 500" >&2; exit 1; }
+    echo "${FAKE_TIP:?}" ;;
+  "api repos/"*/commits/*) echo "${FAKE_COMMIT:?}" ;;
+  "api repos/"*/issues/*/comments*)
+    n=${2#*/issues/}; n=${n%%/*}
+    f=${FAKE_STATE:?}/comments-$n
+    if [ -s "$f" ]; then jq -s . "$f"; else echo '[]'; fi ;;
+  "pr comment")
+    [ -z "${FAKE_COMMENT_EXIT:-}" ] || { echo "gh: comment failed" >&2; exit "$FAKE_COMMENT_EXIT"; }
+    jq -n -c --arg b "$(arg --body "$@")" '{body: $b}' >> "${FAKE_STATE:?}/comments-$3" ;;
+  *) echo "fake gh: unexpected call: $*" >&2; exit 99 ;;
+esac

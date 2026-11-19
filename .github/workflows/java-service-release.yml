@@ -1,13 +1,10 @@
-# Release a trunk service after its merge queue merged: nothing is rebuilt. In the queue,
+# Release a trunk service after its merge queue merged, by deploying :master: nothing is rebuilt
+# and no infrastructure PR is opened (pth-context platform-ops decision 0126). In the queue,
 # java-service-image.yml pushed the queue commit as <service>:sha-<7> and pth-sim.yml simulated
 # prod on it; the queue then fast-forwards master to that exact commit, so on push to master
-# github.sha is the simulated commit. This workflow has the CI GitHub App open a deploy PR in
-# the infrastructure repo (input infra-repo) that pins that image's digest in the prod unit
-# (input prod-unit), and tags the
-# image master (same manifest, same digest) only when no prod unit pins :master. Deploying stays
-# a human merge of that PR: while any prod unit in any region pins :master (ECR replication moves
-# the tag everywhere), moving :master would put an unapproved image into prod at the next task
-# start, so :master is left alone (with a warning) until every prod unit pins a digest.
+# github.sha is the simulated commit. The prod service's task definition pins <service>:master,
+# so this workflow retags sha-<7> as master and forces a new ECS deployment of the prod service in
+# us-east-1. The enqueue is the go for both the merge and the deploy.
 #
 #   on:
 #     push:
@@ -16,37 +13,57 @@
 #     release:
 #       uses: PlantechHubDev/.github/.github/workflows/java-service-release.yml@vX.Y.Z
 #       permissions:
-#         contents: read     # service history for the PR list; commit lookup
-#         id-token: write    # OIDC to AWS (ECR retag)
-#         actions: read      # find the merge_group run for the simulation link
+#         contents: read        # service history for the PR list
+#         id-token: write       # OIDC to AWS (guard, ECR retag, ECS deploy, read-only checks)
+#         actions: read         # the merge_group run (green gate); the last successful release (PR range)
+#         pull-requests: write  # the deployment comment on each carried PR
 #       with:
 #         service-name: example-service
-#         role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
-#         app-id: ${{ vars.PTH_CI_APP_ID }}
+#         role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
 #         checks-ref: vX.Y.Z   # the same tag, so the job runs this tag's scripts
 #         ci-workflow: ci.yml  # the caller's queue CI workflow file
-#         # The infrastructure repo and its layout: pass them from org or repo variables, so the
-#         # layout is never written in this public repo.
-#         infra-repo: ${{ vars.INFRA_REPO }}
-#         prod-unit: ${{ vars.PROD_UNIT }}
-#         prod-units-pattern: ${{ vars.PROD_UNITS_PATTERN }}
-#       secrets:
-#         app-key: ${{ secrets.PTH_CI_APP_KEY }}
+#         # The environment's names: pass them from org or repo variables, never write them here.
+#         ecs-cluster: ${{ vars.ECS_CLUSTER }}
+#         ecs-service: ${{ vars.ECS_SERVICE }}
+#         log-group: ${{ vars.LOG_GROUP }}
+#         alarm-prefix: ${{ vars.ALARM_PREFIX }}
 #
-# Steps, in order: read what the infrastructure repo's master pins now (open-deploy-pr.sh
-# --base-digest: the prod-unit digest, which becomes the PR's rollback digest; --pins: the pin of
-# every prod unit of the service in every region, the paths matching prod-units-pattern) -> pick the sha-<7> digest and retag it master unless a unit
-# pins :master or cannot be parsed (scripts/release-image.sh;
-# a missing sha-<7> image fails the run and opens no PR) -> find the simulation run
-# (scripts/sim-run-url.sh) -> open the deploy PR (scripts/open-deploy-pr.sh, which also writes the
-# step summary). The scripts are covered by scripts/test-ecr-retag.sh and
-# scripts/test-open-deploy-pr.sh.
+# Every gate runs before :master moves, because moving :master is itself what a task restart
+# deploys. Each step runs only if every step before it succeeded:
+#   1. the inputs (checks-ref must be a release tag vX.Y.Z);
+#   1a. the tip check (scripts/release-is-tip.sh): this commit is still the tip of master, so a
+#      re-run of an old release run never rolls prod back without approval (usually a newer
+#      merge landed first, and its release deploys this change too);
+#   2. the green gate (scripts/queue-run-green.sh): the merge_group run of ci-workflow for exactly
+#      this commit concluded success, its ci-ok, image and pth-sim jobs succeeded, and no job
+#      failed or was cancelled;
+#   3. the guard and the retag (scripts/release-image.sh): the running prod service's task
+#      definition (the source of truth, read with describe-services and describe-task-definition)
+#      must deploy <registry>/<service>:master (else exit 3, no AWS write), sha-<7> must exist in
+#      ECR (else exit 2); the digest :master names before the retag is kept as the previous
+#      image; then sha-<7> is tagged master (same manifest, no rebuild);
+#   4. the deployment (scripts/ecs-deploy.sh): update-service --force-new-deployment, then wait
+#      for services-stable;
+#   5. the post-deploy checks (scripts/post-deploy-checks.sh): every running task on the retagged
+#      digest (or a child manifest of its index), deployment COMPLETED at desired count, no ERROR
+#      line in the new deployment's task log streams (running or stopped) since the deploy
+#      started, at least one alarm named alarm-prefix* and none in ALARM;
+#   6. the deployment comment, the change record (scripts/deploy-comment.sh): on the merge's own
+#      PR(s) and every PR since the commit of the last successful run of this workflow on master
+#      (blocked and failed runs never count, so no merge's PR is dropped), once per deploy (a
+#      hidden marker makes re-runs idempotent; no PR at all, or a lookup error, fails), repeated
+#      in the step summary.
+# A failure before step 3's retag changes nothing in prod. A failure after it fails the run
+# loudly: :master already names the new image (the merge was fully green), and recovery is a
+# revert PR through the queue, or a change-review record or break-glass for a faster path.
+# The scripts are covered by scripts/test-ecs-deploy.sh and scripts/test-ecr-retag.sh; this
+# file's structure by scripts/test-workflow-names.sh. No infrastructure repo is read or written.
 #
-# Tokens: the CI App token, limited to the infrastructure repo (contents + pull requests write), for
-# that clone, the branch push, the PR and closing older deploy PRs; the commit is made as the
-# App's bot user. The caller's GITHUB_TOKEN (read) for the service checkout, the commit lookup
-# and the run lookup. AWS access is OIDC only; the role ARN comes from the caller.
-# java-service-publish.yml (develop-first repos) is unchanged.
+# Tokens: the caller's GITHUB_TOKEN only (no CI App): actions read for the gate, contents read for
+# the checkouts, pull-requests write for the comments. AWS
+# access is OIDC only, through the deploy role the caller passes; the job runs in environment
+# prod, which the role's trust requires. java-service-publish.yml (develop-first repos) is
+# unchanged.
 
 name: java-service-release
 
@@ -58,11 +75,7 @@ on:
         type: string
         required: true
       role-to-assume:
-        description: IAM role to assume through OIDC for the ECR retag. Pass vars.ECR_PUSH_ROLE_ARN; never write the ARN in a file.
-        type: string
-        required: true
-      app-id:
-        description: The CI GitHub App's ID (pass vars.PTH_CI_APP_ID).
+        description: The deploy role to assume through OIDC (guard, ECR retag, ECS deploy, read-only checks). Pass vars.DEPLOY_ROLE_ARN; never write the ARN in a file.
         type: string
         required: true
       checks-ref:
@@ -70,24 +83,24 @@ on:
         type: string
         required: true
       ci-workflow:
-        description: File name of the caller's merge-queue CI workflow (e.g. ci.yml), whose merge_group run is the simulation link.
+        description: File name of the caller's merge-queue CI workflow (e.g. ci.yml), whose merge_group run is the green gate.
         type: string
         required: true
-      infra-repo:
-        description: The infrastructure repo the deploy PR goes to, as <owner>/<name>. Pass it from a variable.
+      ecs-cluster:
+        description: The prod ECS cluster (us-east-1) that runs the service. Pass it from a variable.
         type: string
         required: true
-      prod-unit:
-        description: Path, in the infrastructure repo, of the prod unit the deploy PR edits (its pin is the rollback digest). Pass it from a variable.
+      ecs-service:
+        description: The prod ECS service to force a new deployment of. Its task definition must deploy <registry>/<service-name>:master. Pass it from a variable.
         type: string
         required: true
-      prod-units-pattern:
-        description: ERE matched against the infrastructure repo's `git ls-tree -r --name-only` paths that lists every prod unit of the service, in every region (prod-unit included, or the release fails). Pass it from a variable.
+      log-group:
+        description: The service's CloudWatch log group, checked for ERROR lines after the deploy. Pass it from a variable.
         type: string
         required: true
-    secrets:
-      app-key:
-        description: The CI GitHub App's private key.
+      alarm-prefix:
+        description: The name prefix of the service's CloudWatch alarms, none of which may be in ALARM after the deploy. Pass it from a variable.
+        type: string
         required: true
 
 permissions:
@@ -96,11 +109,13 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    environment: prod
     permissions:
       contents: read
       id-token: write
       actions: read
+      pull-requests: write
     concurrency:
       group: release-${{ inputs.service-name }}
       cancel-in-progress: false
@@ -108,26 +123,26 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - name: Check the inputs
-        id: inputs
         env:
           SERVICE: ${{ inputs.service-name }}
           ROLE: ${{ inputs.role-to-assume }}
-          APP_ID: ${{ inputs.app-id }}
           CI_WORKFLOW: ${{ inputs.ci-workflow }}
-          INFRA_REPO: ${{ inputs.infra-repo }}
-          PROD_UNIT: ${{ inputs.prod-unit }}
-          PROD_UNITS_PATTERN: ${{ inputs.prod-units-pattern }}
+          ECS_CLUSTER: ${{ inputs.ecs-cluster }}
+          ECS_SERVICE: ${{ inputs.ecs-service }}
+          LOG_GROUP: ${{ inputs.log-group }}
+          ALARM_PREFIX: ${{ inputs.alarm-prefix }}
+          CHECKS_REF: ${{ inputs.checks-ref }}
         run: |
           [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ] || { echo "::error::release runs only on push to master (got $GITHUB_EVENT_NAME $GITHUB_REF)"; exit 1; }
           printf '%s' "$SERVICE" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || { echo "::error::service-name must be lower-case letters, digits and dashes (got '$SERVICE')"; exit 1; }
-          [ -n "$ROLE" ] || { echo "::error::role-to-assume is empty: pass vars.ECR_PUSH_ROLE_ARN"; exit 1; }
-          [ -n "$APP_ID" ] || { echo "::error::app-id is empty: pass vars.PTH_CI_APP_ID"; exit 1; }
+          [ -n "$ROLE" ] || { echo "::error::role-to-assume is empty: pass vars.DEPLOY_ROLE_ARN"; exit 1; }
           printf '%s' "$CI_WORKFLOW" | grep -Eq '^[A-Za-z0-9_.-]+\.ya?ml$' || { echo "::error::ci-workflow must be a workflow file name such as ci.yml (got '$CI_WORKFLOW')"; exit 1; }
-          [[ $INFRA_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::infra-repo must be <owner>/<name> (got '$INFRA_REPO')"; exit 1; }
-          { [ -n "$PROD_UNIT" ] && [[ $PROD_UNIT != /* && $PROD_UNIT != *..* ]]; } || { echo "::error::prod-unit must be a non-empty relative path with no '..' (got '$PROD_UNIT')"; exit 1; }
-          { [ -n "$PROD_UNITS_PATTERN" ] && [[ $PROD_UNITS_PATTERN != /* && $PROD_UNITS_PATTERN != ^/* ]]; } || { echo "::error::prod-units-pattern must be a non-empty ERE over relative paths, not starting with / or ^/ (got '$PROD_UNITS_PATTERN')"; exit 1; }
-          echo "infra-owner=${INFRA_REPO%%/*}" >> "$GITHUB_OUTPUT"
-          echo "infra-name=${INFRA_REPO#*/}" >> "$GITHUB_OUTPUT"
+          # The job runs the scripts read at checks-ref with the prod deploy role: a release tag only.
+          [[ $CHECKS_REF =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::checks-ref must be a release tag vX.Y.Z (got '$CHECKS_REF')"; exit 1; }
+          [[ $ECS_CLUSTER =~ ^[A-Za-z0-9][A-Za-z0-9_./:-]*$ ]] || { echo "::error::ecs-cluster must be an ECS name (got '$ECS_CLUSTER')"; exit 1; }
+          [[ $ECS_SERVICE =~ ^[A-Za-z0-9][A-Za-z0-9_./:-]*$ ]] || { echo "::error::ecs-service must be an ECS name (got '$ECS_SERVICE')"; exit 1; }
+          [[ $LOG_GROUP =~ ^[A-Za-z0-9_./#-]+$ ]] || { echo "::error::log-group must be a CloudWatch log group name (got '$LOG_GROUP')"; exit 1; }
+          [[ -n $ALARM_PREFIX && $ALARM_PREFIX != *[[:space:]]* ]] || { echo "::error::alarm-prefix must be non-empty, with no spaces (got '$ALARM_PREFIX')"; exit 1; }
 
       - name: Check out the shared scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -137,34 +152,30 @@ jobs:
           path: .pth-checks
           persist-credentials: false
 
-      # Full history: the deploy PR lists the merge commits since the deployed one.
+      # Gate 0: this commit is still the tip of master. Re-running an old release run after newer
+      # merges would otherwise retag an old image and deploy it (an unapproved rollback).
+      - name: Check this commit is the tip of master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .pth-checks/scripts/release-is-tip.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+
+      # Gate 1: the queue's checks on exactly this commit. No AWS access before it passes.
+      - name: Check the merge queue run was green
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        run: |
+          URL=$(bash .pth-checks/scripts/queue-run-green.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$CI_WORKFLOW") || exit 1
+          echo "Merge queue run: $URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # Full history: the deployment comment lists the merge commits since the deployed one.
       - name: Check out the service
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: service
           fetch-depth: 0
-          persist-credentials: false
-
-      - name: Mint the App token for the infrastructure repo
-        id: app
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ inputs.app-id }}
-          private-key: ${{ secrets.app-key }}
-          owner: ${{ steps.inputs.outputs.infra-owner }}
-          repositories: ${{ steps.inputs.outputs.infra-name }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      # No stored credentials: open-deploy-pr.sh fetches and pushes through gh's credential
-      # helper with GH_TOKEN.
-      - name: Check out the infrastructure repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ inputs.infra-repo }}
-          ref: master
-          token: ${{ steps.app.outputs.token }}
-          path: infra
           persist-credentials: false
 
       - name: Configure AWS credentials (OIDC)
@@ -173,73 +184,53 @@ jobs:
           role-to-assume: ${{ inputs.role-to-assume }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Before any retag: the prod-unit digest (rollback digest), and every region's prod pin.
-      - name: Read what prod is pinned to
-        id: base
-        working-directory: infra
-        env:
-          SERVICE: ${{ inputs.service-name }}
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          PROD_UNIT: ${{ inputs.prod-unit }}
-          PROD_UNITS_PATTERN: ${{ inputs.prod-units-pattern }}
-        run: |
-          read -r BASE PIN < <(bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --base-digest "$SERVICE") || exit 1
-          [[ $BASE =~ ^sha256:[0-9a-f]{64}$ && $PIN =~ ^(digest|tag:[A-Za-z0-9_.-]+)$ ]] || { echo "::error::cannot read the prod pin (got '$BASE' '$PIN')"; exit 1; }
-          echo "Rollback digest: $BASE ($PROD_UNIT pin: $PIN)"
-          echo "digest=$BASE" >> "$GITHUB_OUTPUT"
-          bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" --pins "$SERVICE" > "$RUNNER_TEMP/prod-pins" || exit 1
-          echo "Prod units:"; cat "$RUNNER_TEMP/prod-pins"
-
-      # Writes digest=, retagged=true|false and held-by= to GITHUB_OUTPUT; skips the retag (with a
-      # warning) while any prod unit pins :master or cannot be parsed.
-      - name: Pick the simulated image; tag it master unless a prod unit pins master
+      # Gate 2 and the retag: the running prod service deploys <service>:master (else exit 3, no
+      # AWS write) and sha-<7> exists (else exit 2); then sha-<7> is tagged master. Writes digest=
+      # to GITHUB_OUTPUT.
+      - name: Check prod deploys master; tag the simulated image master
         id: retag
         env:
           SERVICE: ${{ inputs.service-name }}
-        run: bash .pth-checks/scripts/release-image.sh "$SERVICE" "$GITHUB_SHA" < "$RUNNER_TEMP/prod-pins"
+          ECS_CLUSTER: ${{ inputs.ecs-cluster }}
+          ECS_SERVICE: ${{ inputs.ecs-service }}
+        run: bash .pth-checks/scripts/release-image.sh "$SERVICE" "$GITHUB_SHA" "$ECS_CLUSTER" "$ECS_SERVICE"
 
-      - name: Find the simulation run
-        id: sim
+      - name: Force a new deployment and wait for it to be stable
+        id: deploy
         env:
-          GH_TOKEN: ${{ github.token }}
-          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+          ECS_CLUSTER: ${{ inputs.ecs-cluster }}
+          ECS_SERVICE: ${{ inputs.ecs-service }}
         run: |
-          URL=$(bash .pth-checks/scripts/sim-run-url.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$CI_WORKFLOW") || exit 1
-          echo "Simulation: $URL"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          bash .pth-checks/scripts/ecs-deploy.sh "$ECS_CLUSTER" "$ECS_SERVICE"
 
-      - name: Resolve the App's bot identity
-        id: bot
+      - name: Post-deploy checks
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          SLUG: ${{ steps.app.outputs.app-slug }}
-        run: |
-          ID=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id) || exit 1
-          [[ $ID =~ ^[0-9]+$ ]] || { echo "::error::bot user id lookup for ${SLUG}[bot] gave '$ID'"; exit 1; }
-          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
-          echo "email=${ID}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          ECS_CLUSTER: ${{ inputs.ecs-cluster }}
+          ECS_SERVICE: ${{ inputs.ecs-service }}
+          DIGEST: ${{ steps.retag.outputs.digest }}
+          SINCE: ${{ steps.deploy.outputs.since }}
+          LOG_GROUP: ${{ inputs.log-group }}
+          ALARM_PREFIX: ${{ inputs.alarm-prefix }}
+        run: bash .pth-checks/scripts/post-deploy-checks.sh "$ECS_CLUSTER" "$ECS_SERVICE" "$DIGEST" "$SINCE" "$LOG_GROUP" "$ALARM_PREFIX"
 
-      - name: Open the deploy PR
-        working-directory: infra
+      - name: Comment on the deployed PRs
         env:
           SERVICE: ${{ inputs.service-name }}
           DIGEST: ${{ steps.retag.outputs.digest }}
-          SIM_URL: ${{ steps.sim.outputs.url }}
-          BASE_DIGEST: ${{ steps.base.outputs.digest }}
-          # The PR body says whether :master moved, so the change record is true either way.
-          RETAGGED: ${{ steps.retag.outputs.retagged }}
-          HELD_BY: ${{ steps.retag.outputs.held-by }}
-          DEPLOY_GIT_NAME: ${{ steps.bot.outputs.name }}
-          DEPLOY_GIT_EMAIL: ${{ steps.bot.outputs.email }}
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          SERVICE_GH_TOKEN: ${{ github.token }}
-          INFRA_REPO: ${{ inputs.infra-repo }}
-          PROD_UNIT: ${{ inputs.prod-unit }}
-        # The script writes the step summary: the PR, "already pinned" (no PR, empty stdout), or an
-        # older deploy PR it could not close (exit 1, with the new PR still open).
+          PREVIOUS: ${{ steps.retag.outputs.previous-digest }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no valid image digest from the previous step (got '$DIGEST')"; exit 1; }
-          rc=0
-          URL=$(SERVICE_REPO="$GITHUB_WORKSPACE/service" bash "$GITHUB_WORKSPACE/.pth-checks/scripts/open-deploy-pr.sh" "$SERVICE" "$DIGEST" "$GITHUB_SHA" "$SIM_URL") || rc=$?
-          if [ -n "$URL" ]; then echo "Deploy PR: $URL"; else echo "No deploy PR opened"; fi
-          exit "$rc"
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          SERVICE_REPO="$GITHUB_WORKSPACE/service" bash .pth-checks/scripts/deploy-comment.sh "$GITHUB_SHA" "$DIGEST" "$PREVIOUS" "$RUN_URL"
+
+      # Only after a green retag: :master already names the new image, so say so loudly.
+      - name: Report a failure after the retag
+        if: failure() && steps.retag.outcome == 'success'
+        env:
+          SERVICE: ${{ inputs.service-name }}
+          DIGEST: ${{ steps.retag.outputs.digest }}
+        run: |
+          MSG="$SERVICE:master now names $DIGEST (the merge was fully green), but a step after the retag failed: the deployment, its checks or the comment. Recovery is a revert PR through the merge queue; a faster path (retag an older sha-<7> and force a deployment) needs a change-review record first, or break-glass when prod is down."
+          echo "::error::$MSG"
+          { echo "### Release failed after the retag"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"

@@ -313,11 +313,6 @@ run "pins: exits 0" 0 --pins $SVC
 is "pins: one line per prod unit, all regions, with its pin" "$so" "$UNIT digest
 $WEST tag:master"
 nologs "pins: no aws call" "$AWS_LOG" "ecr"
-# --pins | release-image.sh: the DR unit's :master pin stops the retag.
-: > "$AWS_LOG"
-pipe=$( (cd "$W" && bash "$HERE/open-deploy-pr.sh" --pins $SVC) | FAKE_TAG_DIGEST=$A FAKE_SRC_DIGEST=$A GITHUB_OUTPUT=$T/out bash "$HERE/release-image.sh" $SVC "$MERGE" 2>&1)
-nologs "pins | release-image: no put-image while region-b pins :master" "$AWS_LOG" "put-image"
-has "pins | release-image: warning names the region-b unit" "$pipe" "$WEST"
 setup terragrunt-digest.hcl
 add_unit "$WEST" terragrunt-digest.hcl
 run "pins: all digests exits 0" 0 --pins $SVC
@@ -333,16 +328,12 @@ G -C "$W" rm -q -r live; G -C "$W" commit -q -m "chore: drop"; G -C "$W" push -q
 run "pins: no prod unit exits 2" 2 --pins $SVC
 run "pins: usage" 64 --pins
 
-# --- the deploy PR's unit must be one of the matched prod units: a pattern that misses PROD_UNIT
-# (here pinning :master) must not let release-image.sh retag :master.
+# --- the deploy PR's unit must be one of the matched prod units.
 setup terragrunt-master.hcl
 add_unit "$WEST" terragrunt-digest.hcl
 PROD_UNITS_PATTERN="^live/region-b/prod/$SVC/terragrunt\\.hcl\$" run "pins: PROD_UNIT not matched by the pattern exits 2" 2 --pins $SVC
 has "pins: names the unmatched PROD_UNIT" "$out" "$UNIT"
 is "pins: unmatched PROD_UNIT prints no units" "$so" ""
-: > "$AWS_LOG"
-pipe=$( (cd "$W" && PROD_UNITS_PATTERN="^live/region-b/prod/$SVC/terragrunt\\.hcl\$" bash "$HERE/open-deploy-pr.sh" --pins $SVC) | FAKE_TAG_DIGEST=$A FAKE_SRC_DIGEST=$A GITHUB_OUTPUT=$T/out bash "$HERE/release-image.sh" $SVC "$MERGE" 2>&1)
-nologs "pins | release-image: unmatched PROD_UNIT, no put-image" "$AWS_LOG" "put-image"
 
 # --- sim-run-url.sh: the merge_group run of the caller's CI workflow for the merged commit
 sim() { : > "$GH_LOG"; out=$(bash "$HERE/sim-run-url.sh" "$@" 2>/dev/null); code=$?; }

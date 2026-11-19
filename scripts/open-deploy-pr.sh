@@ -25,10 +25,12 @@
 # region: every path in `git ls-tree -r --name-only` that matches the ERE PROD_UNITS_PATTERN.
 # <pin> is "digest", "tag:<name>", or
 # "unparseable" when the unit has not exactly one image line of the form above. It reads git only
-# (no AWS). release-image.sh reads this list and leaves :master alone while any unit pins :master
-# or is unparseable (ECR replication would move :master in every region). Exit 0, or 2 when the
-# service has no prod unit or PROD_UNIT is not one of the matched units (the deploy PR edits
-# PROD_UNIT, so the :master guard must see its pin).
+# (no AWS). Exit 0, or 2 when the service has no prod unit or PROD_UNIT is not one of the
+# matched units (the deploy PR edits PROD_UNIT).
+#
+# Not called by java-service-release.yml since v2.6.0, which deploys by retagging :master and
+# forcing a new ECS deployment (its guard reads the running service); kept for the later
+# immutable-tags work.
 #
 # Output: stdout carries only the PR URL (nothing when there is no PR); messages go to stderr.
 # When GITHUB_STEP_SUMMARY is set, a line is added there: the PR, "already pinned", and any older
