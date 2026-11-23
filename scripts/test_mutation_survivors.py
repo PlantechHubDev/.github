@@ -25,9 +25,14 @@ class TargetsTest(unittest.TestCase):
     def targets(self, paths, existing=None):
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root)
-        for rel in self.EXISTING if existing is None else existing:
+        files = self.EXISTING if existing is None else existing
+        if not isinstance(files, dict):
+            files = {rel: None for rel in files}
+        for rel, body in files.items():
             os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
-            open(os.path.join(root, rel), "w").close()
+            name = os.path.basename(rel)[: -len(".java")]
+            with open(os.path.join(root, rel), "w") as f:
+                f.write(body if body is not None else f"public class {name} {{ int f() {{ return 1; }} }}\n")
         changed = os.path.join(root, "changed.txt")
         with open(changed, "w") as f:
             f.write("\n".join(paths) + "\n")
@@ -56,8 +61,36 @@ class TargetsTest(unittest.TestCase):
     def test_no_probe_for_docs_or_main_resources(self):
         self.assertEqual(self.probe(["README.md", "src/main/resources/app.yml", ".github/workflows/ci.yml"]), "probe=")
 
-    def test_no_probe_when_targets_found(self):
-        self.assertEqual(self.probe(["src/main/java/a/b/C.java", "build.gradle"]), "probe=")
+    def test_probe_also_when_targets_found_and_tests_changed(self):
+        # A target with nothing to mutate makes PIT skip its green suite; the PR check then
+        # needs a probe to re-run on.
+        self.assertEqual(self.probe(["src/main/java/a/b/D.java", "src/test/java/a/b/CTest.java"]), "probe=a.b.C")
+
+    def test_no_probe_when_only_production_code_changed(self):
+        self.assertEqual(self.probe(["src/main/java/a/b/C.java"]), "probe=")
+
+    def test_probe_skips_interfaces_enums_records_annotations(self):
+        existing = {
+            "src/main/java/a/b/A.java": "public interface A { void x(); }\n",
+            "src/main/java/a/b/B.java": "/** class docs */\npublic enum B { X }\n",
+            "src/main/java/a/b/C.java": "public record C(int x) {}\n",
+            "src/main/java/a/b/D.java": "public @interface D {}\n",
+            "src/main/java/a/b/E.java": "public final class E { int f() { return 1; } }\n",
+        }
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=a.b.E")
+
+    def test_probe_not_taken_from_subpackage(self):
+        # a.b has no class of its own (only a subpackage does): falls back to the project's first.
+        existing = ["src/main/java/a/b/c/Deep.java", "src/main/java/a/A0.java"]
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=a.A0")
+
+    def test_package_info_only_package_falls_back_to_project(self):
+        existing = {"src/main/java/a/b/package-info.java": "package a.b;\n", "src/main/java/z/Top.java": None}
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=z.Top")
+
+    def test_probe_for_buildsrc_lombok_and_kts(self):
+        for p in ("buildSrc/src/main/groovy/x.gradle", "lombok.config", "build.gradle.kts", "settings.gradle.kts"):
+            self.assertEqual(self.probe([p]), "probe=a.E", p)
 
     def test_no_probe_without_production_classes(self):
         self.assertEqual(self.probe(["build.gradle"], existing=[]), "probe=")

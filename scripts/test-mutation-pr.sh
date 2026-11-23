@@ -21,7 +21,7 @@ repo() {
   git -C "$REPO" init -q -b develop
   git -C "$REPO" config user.email t@example.test; git -C "$REPO" config user.name t
   mkdir -p "$REPO/src/main/java/a/b" "$REPO/src/test/java/a/b"
-  echo 'class C {}' > "$REPO/src/main/java/a/b/C.java"
+  echo 'public class C { int f() { return 1; } }' > "$REPO/src/main/java/a/b/C.java"
   echo 'class CTest {}' > "$REPO/src/test/java/a/b/CTest.java"
   cp "$HERE/fixtures/mutation-pr/bin/gradlew" "$REPO/gradlew"
   git -C "$REPO" add -A; git -C "$REPO" commit -qm base
@@ -78,6 +78,25 @@ repo src/main/java/a/b/D.java
 git -C "$REPO" rm -q src/main/java/a/b/C.java; git -C "$REPO" commit -qm delete
 run "7 deleted class not targeted"     0 ok
 called "7 only D targeted"             '-PpitestTargetClasses=a.b.D,a.b.D$*'
+calls() { local n; n=$(wc -l < "$GRADLE_LOG" | tr -d ' '); if [ "$n" = "$2" ]; then pass "$1"; else fail "$1" "$n gradlew calls, want $2: $(cat "$GRADLE_LOG")"; fi; }
+# 10. Tests changed and the changed class has nothing to mutate (an interface): PIT skipped its
+#     green suite, so the check re-runs PIT on the probe class, which here is red under PIT.
+repo src/main/java/a/b/D.java src/test/java/a/b/HelperTest.java
+run "10 no-mutations re-runs on probe" 1 nomut,green
+calls "10 two PIT runs"                2
+has "10 names the cause"               "tests fail under PIT without mutation"
+# 10b. Same, and the probe run is green: pass.
+repo src/main/java/a/b/D.java src/test/java/a/b/HelperTest.java
+run "10b probe re-run green passes"    0 nomut,ok
+calls "10b two PIT runs"               2
+# 11. Test-only change whose probe class also has nothing to mutate: the suite never ran: fail.
+repo src/test/java/a/b/HelperTest.java
+run "11 probe with no mutations fails" 1 nomut
+has "11 says the suite did not run"    "green-suite check did not run"
+# 12. Only production code changed and nothing to mutate: no tests changed, pass with one run.
+repo src/main/java/a/b/C.java
+run "12 main-only no mutations passes" 0 nomut
+calls "12 one PIT run"                 1
 # 9. Gradle fails after PIT wrote its report: the exit code wins, the check fails.
 repo src/main/java/a/b/C.java
 run "9 report then failure fails"      1 okfail

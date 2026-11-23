@@ -25,8 +25,9 @@
 # only when PIT cannot run: tests fail under PIT without mutation (for example a test that
 # relies on a system property only Gradle's `test` task sets), a PIT or Gradle error, or no
 # report when mutations were found. Surviving mutants never fail it; the nightly files them.
-# When no changed class maps but a test or build file changed, it runs PIT on one probe
-# class so the green-suite check still runs; with neither it skips PIT and passes. On
+# When a test or build file changed it makes sure PIT's green-suite check ran, using one
+# concrete probe class when no class maps or the targets had nothing to mutate; with
+# neither changed it skips PIT and passes. On
 # merge_group it diffs against the queue's base. Work is in scripts/mutation-pr.sh.
 #
 # It is a separate workflow, not a job in java-service-ci.yml, so java libraries (which call

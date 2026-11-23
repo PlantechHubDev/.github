@@ -7,11 +7,12 @@ Usage:
                                   [--diff <unified-diff> --whole <globs>]
 
 targets prints three lines: "targets=<comma globs>", "whole=<comma globs>" and
-"probe=<fqcn or empty>". probe is set only when targets is empty and a test or
-build file changed (src/test/, build.gradle*, settings.gradle*,
-gradle.properties, gradle/): one production class, in the first changed
-test's package if it has one, so the PR check can still run PIT's
-green-suite check. The nightly ignores it.
+"probe=<fqcn or empty>". probe is set when a test or build file changed
+(src/test/, buildSrc/, gradle/, build.gradle[.kts], settings.gradle[.kts],
+gradle.properties, lombok.config): one concrete production class (not an
+interface, enum, record or annotation), in the first changed test's package
+if it has one, so the PR check can make sure PIT's green-suite check ran.
+The nightly ignores it.
   src/main/java/a/b/C.java            -> a.b.C,a.b.C$*  (not a.b.C*: that matches a.b.CustomerService)
   src/test/java/a/b/CTest.java        -> a.b.C,a.b.C$*  (also whole-class)
   src/test/java/a/b/CProperties.java  -> a.b.C,a.b.C$*  (also whole-class)
@@ -88,10 +89,23 @@ def cmd_targets(args):
                     whole.append(glob)
     print("targets=" + ",".join(targets))
     print("whole=" + ",".join(whole))
-    print("probe=" + (probe_class(args.root, paths) if not targets else ""))
+    print("probe=" + probe_class(args.root, paths))
 
 
-PROBE_RE = re.compile(r"^(src/test/|build\.gradle|settings\.gradle|gradle\.properties$|gradle/)")
+PROBE_RE = re.compile(
+    r"^(src/test/|buildSrc/|gradle/|lombok\.config$|gradle\.properties$)|(^|/)(build|settings)\.gradle(\.kts)?$"
+)
+# The first type a file declares; only a class can be relied on to have code PIT can mutate.
+TYPE_RE = re.compile(r"^[^/*\n]*?\b(class|interface|enum|record|@interface)\s+[A-Za-z_]", re.M)
+
+
+def is_concrete_class(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            m = TYPE_RE.search(f.read())
+    except OSError:
+        return False
+    return bool(m) and m.group(1) == "class"
 
 
 def production_classes(root, package=""):
@@ -101,16 +115,17 @@ def production_classes(root, package=""):
         if package and dirpath != os.path.join(base, package.replace(".", "/")):
             continue
         for name in files:
-            if name.endswith(".java") and name != "package-info.java":
+            if name.endswith(".java") and is_concrete_class(os.path.join(dirpath, name)):
                 rel = os.path.relpath(os.path.join(dirpath, name), base)
                 found.append(to_fqcn(rel[: -len(".java")]))
     return sorted(found)
 
 
 def probe_class(root, paths):
-    """One production class for the PR check to run PIT on when no changed class maps but
-    tests or build files changed, so PIT's green-suite check still runs: a class in the
-    package of the first changed test, else the first class of the project, else none."""
+    """When tests or build files changed: one concrete production class for the PR check to
+    run PIT on, so PIT's green-suite check runs even when no changed class maps, or when the
+    changed classes have nothing to mutate (PIT then skips its tests). A class in the package
+    of the first changed test, else the first class of the project, else none."""
     changed = [p for p in paths if PROBE_RE.match(p)]
     if not changed:
         return ""
