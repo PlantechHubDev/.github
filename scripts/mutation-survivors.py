@@ -6,13 +6,13 @@ Usage:
   mutation-survivors.py survivors --mutations <mutations.xml> --repo <name> --sha <sha>
                                   [--diff <unified-diff> --whole <globs>]
 
-targets prints three lines: "targets=<comma globs>", "whole=<comma globs>" and
-"probe=<fqcn or empty>". probe is set when a test or build file changed
-(src/test/, buildSrc/, gradle/, build.gradle[.kts], settings.gradle[.kts],
-gradle.properties, lombok.config): one concrete production class (not an
-interface, enum, record or annotation), in the first changed test's package
-if it has one, so the PR check can make sure PIT's green-suite check ran.
-The nightly ignores it.
+targets prints four lines: "targets=<comma globs>", "whole=<comma globs>",
+"probe=<comma fqcns or empty>" and "tests_changed=0|1". tests_changed is 1
+when a test or build file changed (src/test/, buildSrc/, gradle/,
+build.gradle[.kts], settings.gradle[.kts], gradle.properties, lombok.config);
+probe then lists up to 5 concrete production classes (not interfaces, enums,
+records or annotations), the first changed test's package first, so the PR
+check can make sure PIT's green-suite check ran. The nightly ignores both.
   src/main/java/a/b/C.java            -> a.b.C,a.b.C$*  (not a.b.C*: that matches a.b.CustomerService)
   src/test/java/a/b/CTest.java        -> a.b.C,a.b.C$*  (also whole-class)
   src/test/java/a/b/CProperties.java  -> a.b.C,a.b.C$*  (also whole-class)
@@ -89,30 +89,39 @@ def cmd_targets(args):
                     whole.append(glob)
     print("targets=" + ",".join(targets))
     print("whole=" + ",".join(whole))
-    print("probe=" + probe_class(args.root, paths))
+    print("probe=" + ",".join(probe_classes(args.root, paths)))
+    print("tests_changed=" + ("1" if any(PROBE_RE.match(p) for p in paths) else "0"))
 
 
 PROBE_RE = re.compile(
     r"^(src/test/|buildSrc/|gradle/|lombok\.config$|gradle\.properties$)|(^|/)(build|settings)\.gradle(\.kts)?$"
 )
-# The first type a file declares; only a class can be relied on to have code PIT can mutate.
-TYPE_RE = re.compile(r"^[^/*\n]*?\b(class|interface|enum|record|@interface)\s+[A-Za-z_]", re.M)
+PROBE_MAX = 5
+# Comments and string or char literals, removed before looking for the declared type.
+NOISE_RE = re.compile(r'/\*.*?\*/|//[^\n]*|"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
+# The first type the file declares; `Foo.class` literals don't count.
+TYPE_RE = re.compile(r"(?<![.\w])(@\s*interface|class|interface|enum|record)\s+[A-Za-z_]")
 
 
 def is_concrete_class(path):
+    """True when the file's first declared type is a class (abstract or not): the only kind
+    that reliably has code for PIT to mutate. Interfaces, enums, records, annotations: no."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
-            m = TYPE_RE.search(f.read())
+            text = NOISE_RE.sub(" ", f.read())
     except OSError:
         return False
+    m = TYPE_RE.search(text)
     return bool(m) and m.group(1) == "class"
 
 
 def production_classes(root, package=""):
+    """Concrete classes directly in <package> (or, with no package, the whole project), sorted."""
     base = os.path.join(root, "src/main/java")
+    top = os.path.join(base, package.replace(".", "/")) if package else base
     found = []
-    for dirpath, _, files in os.walk(os.path.join(base, package.replace(".", "/"))):
-        if package and dirpath != os.path.join(base, package.replace(".", "/")):
+    for dirpath, _, files in os.walk(top):
+        if package and dirpath != top:
             continue
         for name in files:
             if name.endswith(".java") and is_concrete_class(os.path.join(dirpath, name)):
@@ -121,22 +130,28 @@ def production_classes(root, package=""):
     return sorted(found)
 
 
-def probe_class(root, paths):
-    """When tests or build files changed: one concrete production class for the PR check to
-    run PIT on, so PIT's green-suite check runs even when no changed class maps, or when the
-    changed classes have nothing to mutate (PIT then skips its tests). A class in the package
-    of the first changed test, else the first class of the project, else none."""
+def probe_classes(root, paths):
+    """When a test or build file changed: up to PROBE_MAX concrete production classes for the
+    PR check to run PIT on, so PIT's green-suite check runs even when no changed class maps
+    or the changed classes have nothing to mutate (PIT then runs no tests). Several, because a
+    concrete class can still have nothing PIT mutates (a constructor-only exception, a
+    constants holder). The first changed test's package first, then the project."""
     changed = [p for p in paths if PROBE_RE.match(p)]
     if not changed:
-        return ""
+        return []
+    picked = []
     for p in changed:
         m = re.match(r"^src/test/java/(.+)/[^/]+\.java$", p)
         if m:
-            same = production_classes(root, to_fqcn(m.group(1)))
-            if same:
-                return same[0]
-    every = production_classes(root)
-    return every[0] if every else ""
+            picked = production_classes(root, to_fqcn(m.group(1)))[:PROBE_MAX]
+            if picked:
+                break
+    for c in production_classes(root):
+        if len(picked) >= PROBE_MAX:
+            break
+        if c not in picked:
+            picked.append(c)
+    return picked
 
 
 GREEN_SUITE_FAILED = "did not pass without mutation"

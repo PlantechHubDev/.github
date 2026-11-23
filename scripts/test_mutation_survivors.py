@@ -38,36 +38,55 @@ class TargetsTest(unittest.TestCase):
             f.write("\n".join(paths) + "\n")
         r = run("targets", "--changed", changed, "--root", root)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.last_probe = r.stdout.splitlines()[2]
-        return r.stdout.splitlines()[:2]
+        self.last_lines = r.stdout.splitlines()
+        self.last_probe = self.last_lines[2]
+        return self.last_lines[:2]
 
     def probe(self, paths, existing=None):
         self.targets(paths, existing)
         return self.last_probe
 
-    # probe: when no class maps but tests or build files changed, one production class for the
-    # PR check to run PIT on, so PIT's green-suite check still runs (orchestration-service#596
-    # changed only tests and build.gradle).
-    def test_probe_same_package_class_for_unmapped_test(self):
-        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"]), "probe=a.b.C")
+    # probe: when tests or build files changed, up to 5 concrete production classes (the changed
+    # test's package first, then the project) for the PR check to run PIT on, so PIT's
+    # green-suite check runs even when no class maps or the targets have nothing to mutate.
+    # orchestration-service#596 changed only tests and build.gradle.
+    def changed_flag(self, paths, existing=None):
+        self.targets(paths, existing)
+        return self.last_lines[3]
 
-    def test_probe_first_class_for_build_file_only(self):
-        self.assertEqual(self.probe(["build.gradle"]), "probe=a.E")
+    def test_probe_package_first_then_project(self):
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"]), "probe=a.b.C,a.b.D,a.E")
+
+    def test_probe_project_classes_for_build_file_only(self):
+        self.assertEqual(self.probe(["build.gradle"]), "probe=a.E,a.b.C,a.b.D")
+
+    def test_probe_capped_at_five(self):
+        existing = [f"src/main/java/p/K{n}.java" for n in range(8)]
+        self.assertEqual(self.probe(["build.gradle"], existing), "probe=p.K0,p.K1,p.K2,p.K3,p.K4")
 
     def test_probe_for_test_resources_and_gradle_dir(self):
-        self.assertEqual(self.probe(["src/test/resources/pact/x.json"]), "probe=a.E")
-        self.assertEqual(self.probe(["gradle/libs.versions.toml"]), "probe=a.E")
+        self.assertEqual(self.probe(["src/test/resources/pact/x.json"]), "probe=a.E,a.b.C,a.b.D")
+        self.assertEqual(self.probe(["gradle/libs.versions.toml"]), "probe=a.E,a.b.C,a.b.D")
+
+    def test_probe_for_buildsrc_lombok_and_kts(self):
+        for p in ("buildSrc/src/main/groovy/x.gradle", "lombok.config", "build.gradle.kts", "settings.gradle.kts"):
+            self.assertEqual(self.probe([p]), "probe=a.E,a.b.C,a.b.D", p)
 
     def test_no_probe_for_docs_or_main_resources(self):
-        self.assertEqual(self.probe(["README.md", "src/main/resources/app.yml", ".github/workflows/ci.yml"]), "probe=")
+        paths = ["README.md", "src/main/resources/app.yml", ".github/workflows/ci.yml"]
+        self.assertEqual(self.probe(paths), "probe=")
+        self.assertEqual(self.changed_flag(paths), "tests_changed=0")
 
     def test_probe_also_when_targets_found_and_tests_changed(self):
-        # A target with nothing to mutate makes PIT skip its green suite; the PR check then
-        # needs a probe to re-run on.
-        self.assertEqual(self.probe(["src/main/java/a/b/D.java", "src/test/java/a/b/CTest.java"]), "probe=a.b.C")
+        self.assertEqual(self.probe(["src/main/java/a/b/D.java", "src/test/java/a/b/CTest.java"]), "probe=a.b.C,a.b.D,a.E")
 
     def test_no_probe_when_only_production_code_changed(self):
         self.assertEqual(self.probe(["src/main/java/a/b/C.java"]), "probe=")
+        self.assertEqual(self.changed_flag(["src/main/java/a/b/C.java"]), "tests_changed=0")
+
+    def test_tests_changed_even_without_a_concrete_class(self):
+        self.assertEqual(self.probe(["build.gradle"], existing=[]), "probe=")
+        self.assertEqual(self.changed_flag(["build.gradle"], existing=[]), "tests_changed=1")
 
     def test_probe_skips_interfaces_enums_records_annotations(self):
         existing = {
@@ -76,24 +95,34 @@ class TargetsTest(unittest.TestCase):
             "src/main/java/a/b/C.java": "public record C(int x) {}\n",
             "src/main/java/a/b/D.java": "public @interface D {}\n",
             "src/main/java/a/b/E.java": "public final class E { int f() { return 1; } }\n",
+            "src/main/java/a/b/F.java": "public sealed interface F permits G {}\n",
         }
         self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=a.b.E")
 
+    def test_type_detection_ignores_comments_strings_and_annotations(self):
+        existing = {
+            # License header with an unstarred line naming an interface: still a class.
+            "src/main/java/a/b/A.java": "/*\n interface Xyz is licensed\n */\npublic class A { int f() { return 1; } }\n",
+            # Header naming a class in front of an interface: still an interface.
+            "src/main/java/a/b/B.java": "/*\n class Action\n */\npublic interface B {}\n",
+            # A string in an annotation: still an interface.
+            "src/main/java/a/b/C.java": '@Doc("a class Thing") public interface C {}\n',
+            # A slash on the declaration line and a nested enum: still a class.
+            "src/main/java/a/b/D.java": '@RequestMapping("/api") public class D { enum S { X } int f() { return 1; } }\n',
+            # Foo.class literal before an interface declaration does not count.
+            "src/main/java/a/b/E.java": "@RunWith(Foo.class)\npublic interface E {}\n",
+            "src/main/java/a/b/F.java": "public abstract class F<T extends Comparable<T>> { int f() { return 1; } }\n",
+        }
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=a.b.A,a.b.D,a.b.F")
+
     def test_probe_not_taken_from_subpackage(self):
-        # a.b has no class of its own (only a subpackage does): falls back to the project's first.
+        # a.b has no class of its own (only a subpackage does): the project's classes follow.
         existing = ["src/main/java/a/b/c/Deep.java", "src/main/java/a/A0.java"]
-        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=a.A0")
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=a.A0,a.b.c.Deep")
 
     def test_package_info_only_package_falls_back_to_project(self):
         existing = {"src/main/java/a/b/package-info.java": "package a.b;\n", "src/main/java/z/Top.java": None}
         self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"], existing), "probe=z.Top")
-
-    def test_probe_for_buildsrc_lombok_and_kts(self):
-        for p in ("buildSrc/src/main/groovy/x.gradle", "lombok.config", "build.gradle.kts", "settings.gradle.kts"):
-            self.assertEqual(self.probe([p]), "probe=a.E", p)
-
-    def test_no_probe_without_production_classes(self):
-        self.assertEqual(self.probe(["build.gradle"], existing=[]), "probe=")
 
     def test_test_file_without_main_class_dropped(self):
         # 2026-11-18: OrchestrationDebtFieldsPassThroughTest mapped to a class that does not exist.
