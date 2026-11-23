@@ -72,6 +72,10 @@ repo src/main/java/a/b/D.java
 git -C "$REPO" rm -q src/main/java/a/b/C.java; git -C "$REPO" commit -qm delete
 run "7 deleted class not targeted"     0 ok
 called "7 only D targeted"             '-PpitestTargetClasses=a.b.D,a.b.D$*'
+# 9. Gradle fails after PIT wrote its report: the exit code wins, the check fails.
+repo src/main/java/a/b/C.java
+run "9 report then failure fails"      1 okfail
+has "9 names the cause"                "PIT or Gradle error (exit 1)"
 # 8. No base: usage error, never a silent pass.
 : > "$GRADLE_LOG"
 out=$(cd "$REPO" && bash "$CHECK" 2>&1); code=$?

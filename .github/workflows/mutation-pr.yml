@@ -9,6 +9,20 @@
 #     secrets:
 #       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
 #
+#   ci-ok:
+#     needs: [checks, build, paired-tests, mutation]
+#     ...
+#       with:
+#         jobs: ${{ toJSON(needs) }}
+#         allowed-skips: ${{ github.actor == 'dependabot[bot]' && 'build,mutation' || '' }}
+#
+# The job skips only on Dependabot runs (no secrets there). Allow the skip only on those runs,
+# as above, so a skip from any other cause turns ci-ok red instead of passing silently.
+#
+# Known gap: a PR that changes only tests or build files maps to no class and skips PIT, so a
+# test red only under PIT is caught by the nightly (and its red-nightly issue) the first night
+# PIT targets any class, not at the PR (.github#37).
+#
 # It runs PIT on the classes the PR changed, with the nightly's target mapping and the same
 # Gradle `pitest` task the nightly runs (see mutation-nightly.yml for what the build must
 # declare; the build MUST NOT set PIT's mutationThreshold or coverageThreshold). It fails
