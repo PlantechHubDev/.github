@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stub ./gradlew for scripts/test-mutation-pr.sh. Appends its argv to $GRADLE_LOG and acts
+# out one PIT outcome from $GRADLE_MODE, printing a log copied from real runs:
+#   ok         prints pit-ok.log, writes build/reports/pitest/mutations.xml (with survivors), exit 0
+#   nomut      prints pit-no-mutations.log, writes no report, exit 0
+#   green      prints pit-green-suite.log, writes no report, exit 1
+#   noreport   prints pit-ok.log, writes no report, exit 0
+M=${MUTATION_FIX:?}
+echo "$*" >> "${GRADLE_LOG:?}"
+case "${GRADLE_MODE:?}" in
+  ok) cat "$M/pit-ok.log"; mkdir -p build/reports/pitest; cp "$M/mutations.xml" build/reports/pitest/mutations.xml ;;
+  nomut) cat "$M/pit-no-mutations.log" ;;
+  green) cat "$M/pit-green-suite.log"; exit 1 ;;
+  noreport) cat "$M/pit-ok.log" ;;
+  *) echo "stub gradlew: unknown mode $GRADLE_MODE" >&2; exit 9 ;;
+esac
