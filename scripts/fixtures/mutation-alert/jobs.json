@@ -1,0 +1,7 @@
+{"total_count":2,"jobs":[
+ {"id":9001,"name":"mutation / mutation","conclusion":"failure","steps":[
+   {"name":"Set up job","conclusion":"success","number":1},
+   {"name":"Find what changed","conclusion":"success","number":4},
+   {"name":"Run PIT","conclusion":"failure","number":7},
+   {"name":"Find survivors","conclusion":"skipped","number":8}]},
+ {"id":9002,"name":"mutation / alert","conclusion":null,"steps":[]}]}

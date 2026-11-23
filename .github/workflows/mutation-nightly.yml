@@ -14,7 +14,12 @@
 #         issues: write
 #         actions: read
 #         packages: read
+#       with:
+#         force-failure: ${{ inputs.force-failure || false }}
 #       secrets: inherit
+#
+# (with `workflow_dispatch: inputs: force-failure: {type: boolean, default: false}`, so a
+# manual run can prove the alert below.)
 #
 # The repo's Gradle build declares a `pitest` task that reads the comma-separated class
 # globs from -PpitestTargetClasses (none means the whole project) and writes
@@ -38,6 +43,11 @@
 # "Mutation survivors: <fully.qualified.Class>", label mutation-survivor, created with
 # this workflow's GITHUB_TOKEN so the dispatcher recognises them (author github-actions).
 # An open issue with the same title is never duplicated.
+#
+# Red nightly alert (job `alert`, after `mutation`, scripts/mutation-alert.sh): a failed or
+# cancelled run opens one issue "mutation-nightly red: <repo>" (labels bug, area:test-infra,
+# priority:P1) with the failing step, the run link and the last 30 log lines, or comments
+# on that issue when it is already open. The next green run closes it.
 
 name: mutation-nightly
 
@@ -52,6 +62,10 @@ on:
         description: Tag of PlantechHubDev/.github whose scripts this run uses (mutation-survivors.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
         type: string
         default: v2.7.0
+      force-failure:
+        description: Fail the mutation job before PIT, to prove the red-nightly alert. Pass it from the caller's workflow_dispatch input.
+        type: boolean
+        default: false
     secrets:
       PUBLISH_TOKEN:
         description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
@@ -144,6 +158,12 @@ jobs:
           fi
           git diff -U0 "$LAST..HEAD" -- src/main/java > "$RUNNER_TEMP/changes.diff"
           printf 'run=true\ntargets=%s\nwhole=%s\n' "$targets" "$whole" >> "$GITHUB_OUTPUT"
+
+      - name: Forced failure
+        if: inputs.force-failure
+        run: |
+          echo "::error::Forced failure (force-failure input): proving the red-nightly alert."
+          exit 1
 
       - name: Set up JDK
         if: steps.changes.outputs.run == 'true'
@@ -243,3 +263,31 @@ jobs:
           name: pitest-report
           path: build/reports/pitest
           if-no-files-found: ignore
+
+  alert:
+    # Runs after every nightly, red or green, so a red one reaches someone (.github#33).
+    needs: mutation
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - name: Check out the shared scripts at checks-ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PlantechHubDev/.github
+          ref: ${{ inputs.checks-ref }}
+          path: .pth-checks
+          persist-credentials: false
+
+      - name: Open, update or close the red-nightly issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.mutation.result }}
+        run: bash .pth-checks/scripts/mutation-alert.sh "$REPO" "$RUN_ID" "$RUN_URL" "$RESULT"

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Stub for `gh`, used by scripts/test-mutation-alert.sh. Appends each call's argv (one line)
+# to $GH_LOG and serves recorded data from the case directory $MA_CASE:
+#   issue list ...                               -> $MA_CASE/open-issues.json (with --jq applied)
+#   api repos/<o>/<r>/actions/runs/<id>/jobs...  -> ../jobs.json
+#   api repos/<o>/<r>/actions/jobs/<id>/logs     -> ../job.log (absent: HTTP 404)
+#   issue create|comment|close, label create     -> logged; a --body-file is copied to $GH_LOG.body
+D=$(cd "$(dirname "$0")/.." && pwd)
+echo "$*" >> "${GH_LOG:?}"
+args=" $* "
+jqf=""; body=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--jq" ] && jqf=$a
+  [ "$prev" = "--body-file" ] && body=$a
+  prev=$a
+done
+serve() {
+  [ -f "$1" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+  if [ -n "$jqf" ]; then jq -r "$jqf" "$1"; else cat "$1"; fi
+}
+case "$args" in
+  " issue list "*) serve "${MA_CASE:?}/open-issues.json" ;;
+  *"/actions/runs/"*"/jobs"*) serve "$D/jobs.json" ;;
+  *"/actions/jobs/"*"/logs "*) serve "${MA_LOG:-$D/job.log}" ;;
+  " issue create "*|" issue comment "*|" issue close "*)
+    if [ -n "$body" ]; then cat "$body" >> "$GH_LOG.body"; fi
+    case "$args" in " issue create "*) echo "https://github.com/example/example-service/issues/77" ;; esac ;;
+  " label create "*) exit 0 ;;
+  *) echo "stub gh: unrecognised call: $*" >&2; exit 1 ;;
+esac
