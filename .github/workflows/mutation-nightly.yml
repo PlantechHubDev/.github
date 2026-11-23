@@ -61,7 +61,7 @@ on:
       checks-ref:
         description: Tag of PlantechHubDev/.github whose scripts this run uses (mutation-survivors.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
         type: string
-        default: v2.7.0
+        default: v2.7.1
       force-failure:
         description: Fail the mutation job before PIT, to prove the red-nightly alert. Pass it from the caller's workflow_dispatch input.
         type: boolean
@@ -162,7 +162,9 @@ jobs:
       - name: Forced failure
         if: inputs.force-failure
         run: |
-          echo "::error::Forced failure (force-failure input): proving the red-nightly alert."
+          msg="Forced failure (force-failure input): proving the red-nightly alert."
+          echo "$msg" >> "$RUNNER_TEMP/pit.log"
+          echo "::error::$msg"
           exit 1
 
       - name: Set up JDK
@@ -202,6 +204,7 @@ jobs:
           result=$(sed -n 's/^result=//p' "$RUNNER_TEMP/pit-result.out")
           reason=$(sed -n 's/^reason=//p' "$RUNNER_TEMP/pit-result.out")
           if [ "$verdict" -ne 0 ]; then
+            echo "PIT could not run: ${reason:-pit-result exit $verdict}" >> "$RUNNER_TEMP/pit.log"
             echo "::error::PIT could not run: ${reason:-pit-result exit $verdict}"
             exit 1
           fi
@@ -256,6 +259,24 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      # The alert job quotes this: GitHub does not serve a job's log through the API while its
+      # run is still going, which it is when the alert runs.
+      - name: Save the failure log for the alert
+        if: failure()
+        run: |
+          if [ -s "$RUNNER_TEMP/pit.log" ]; then
+            tail -n 30 "$RUNNER_TEMP/pit.log" > "$RUNNER_TEMP/mutation-failure.log"
+          fi
+
+      - name: Upload the failure log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-failure-log
+          path: ${{ runner.temp }}/mutation-failure.log
+          if-no-files-found: ignore
+          retention-days: 1
+
       - name: Upload the PIT report
         if: always() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -283,6 +304,14 @@ jobs:
           path: .pth-checks
           persist-credentials: false
 
+      - name: Fetch the failure log the mutation job saved
+        if: needs.mutation.result != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: gh run download "$RUN_ID" --repo "$REPO" -n mutation-failure-log -D "$RUNNER_TEMP/failure-log" || echo "No saved failure log; the alert falls back to the logs API."
+
       - name: Open, update or close the red-nightly issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -290,4 +319,4 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RESULT: ${{ needs.mutation.result }}
-        run: bash .pth-checks/scripts/mutation-alert.sh "$REPO" "$RUN_ID" "$RUN_URL" "$RESULT"
+        run: bash .pth-checks/scripts/mutation-alert.sh "$REPO" "$RUN_ID" "$RUN_URL" "$RESULT" "$RUNNER_TEMP/failure-log/mutation-failure.log"

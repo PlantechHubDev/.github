@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mutation-alert.sh <owner/repo> <run-id> <run-url> <result>
+# mutation-alert.sh <owner/repo> <run-id> <run-url> <result> [<saved-log>]
 #
 # Run by mutation-nightly.yml's `alert` job after the `mutation` job, with that job's
 # result (needs.mutation.result). A red nightly must reach someone (.github#33):
@@ -10,14 +10,17 @@
 #   success             close the open issue, if any, with a link to the green run.
 #   skipped             nothing.
 # The log is best effort: when it cannot be read the issue still opens and says so.
+# <saved-log> is the tail the mutation job saved for itself on failure: GitHub does not
+# serve a job's log through the API while its run is still going, which it is while this
+# runs. Without it (or when it is missing or empty) the logs API is tried.
 # Needs GH_TOKEN with issues: write and actions: read. Exit 2: bad arguments.
 set -euo pipefail
 
-if [ $# -ne 4 ]; then
-  echo "usage: mutation-alert.sh <owner/repo> <run-id> <run-url> <result>" >&2
+if [ $# -ne 4 ] && [ $# -ne 5 ]; then
+  echo "usage: mutation-alert.sh <owner/repo> <run-id> <run-url> <result> [<saved-log>]" >&2
   exit 2
 fi
-repo=$1 run_id=$2 run_url=$3 result=$4
+repo=$1 run_id=$2 run_url=$3 result=$4 saved=${5:-}
 case "$result" in
   success|failure|cancelled) ;;
   skipped) echo "mutation job skipped: nothing to report."; exit 0 ;;
@@ -60,7 +63,9 @@ if gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" > "$tmp/jobs.json
     [ -n "$name" ] && step=$name
   fi
 fi
-if [ -n "$job_id" ] && gh api "repos/$repo/actions/jobs/$job_id/logs" > "$tmp/job.log" 2>/dev/null && [ -s "$tmp/job.log" ]; then
+if [ -n "$saved" ] && [ -s "$saved" ]; then
+  tail -n 30 "$saved" | cut -c1-500 > "$tmp/tail.log"
+elif [ -n "$job_id" ] && gh api "repos/$repo/actions/jobs/$job_id/logs" > "$tmp/job.log" 2>/dev/null && [ -s "$tmp/job.log" ]; then
   if [ -n "$from" ] && [ -n "$to" ]; then
     # Log lines start with an ISO timestamp; compare to the second (YYYY-MM-DDTHH:MM:SS).
     awk -v from="${from:0:19}" -v to="${to:0:19}" '{ t = substr($1, 1, 19) } t >= from && t <= to' "$tmp/job.log" > "$tmp/step.log"

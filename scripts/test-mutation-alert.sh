@@ -81,6 +81,21 @@ out=$(MA_CASE="$FIX/none" MA_LOG=/nonexistent bash "$ALERT" "$R" 123 "$URL" fail
 if [ "$code" = 0 ]; then pass "7 no log still exits 0"; else fail "7 no log" "exit $code: $out"; fi
 count "7 one create"                1 "issue create"
 body  "7 says log unavailable"      "log unavailable"
+# 9. The mutation job saved its own log tail (the logs API can't serve a running run's job log):
+#    the issue quotes that file and the logs API is not called.
+: > "$GH_LOG"; : > "$GH_LOG.body"
+printf 'saved line 1\nsaved ##[error] tests fail under PIT without mutation\n' > "$T/saved.log"
+out=$(MA_CASE="$FIX/none" MA_LOG=/nonexistent bash "$ALERT" "$R" 123 "$URL" failure "$T/saved.log" 2>&1); code=$?
+if [ "$code" = 0 ]; then pass "9 saved log exits 0"; else fail "9 saved log" "exit $code: $out"; fi
+body  "9 quotes the saved log"      "saved ##[error] tests fail under PIT without mutation"
+count "9 logs API not called"       0 "/logs"
+nobody "9 no unavailable note"      "log unavailable"
+# 9b. A saved-log path that doesn't exist (the job saved nothing): falls back to the API.
+: > "$GH_LOG"; : > "$GH_LOG.body"
+out=$(MA_CASE="$FIX/none" bash "$ALERT" "$R" 123 "$URL" failure "$T/missing.log" 2>&1); code=$?
+if [ "$code" = 0 ]; then pass "9b missing saved log exits 0"; else fail "9b" "exit $code: $out"; fi
+count "9b logs API used"            1 "/logs"
+body  "9b API log quoted"           "log line 40"
 # 8. Bad arguments fail loudly.
 run "8 unknown result"              none 2 bogus
 : > "$GH_LOG"
