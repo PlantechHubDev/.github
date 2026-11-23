@@ -49,7 +49,7 @@ count "1 lookup by title search"    1 'issue list --repo example/example-service
 nobody "1 next step in same second cut" "upload-artifact"
 count "1 search-lag fallback list"   1 "issue list --repo $R --state open --limit 1000 --json number,title"
 body  "1 step exit line kept"       "Process completed with exit code 1."
-body  "1 heading names the step"    "Last 30 lines of the failing step's log"
+body  "1 heading"                   "Last 30 lines of the log"
 # 2. Second failure: one comment on #42, no new issue.
 run "2 failure, #42 open"           open 0 failure
 count "2 no create"                 0 "issue create"
@@ -96,6 +96,11 @@ out=$(MA_CASE="$FIX/none" bash "$ALERT" "$R" 123 "$URL" failure "$T/missing.log"
 if [ "$code" = 0 ]; then pass "9b missing saved log exits 0"; else fail "9b" "exit $code: $out"; fi
 count "9b logs API used"            1 "/logs"
 body  "9b API log quoted"           "log line 40"
+# 9c. An empty saved log (nothing was saved) also falls back to the API.
+: > "$GH_LOG"; : > "$GH_LOG.body"; : > "$T/empty.log"
+out=$(MA_CASE="$FIX/none" bash "$ALERT" "$R" 123 "$URL" failure "$T/empty.log" 2>&1); code=$?
+if [ "$code" = 0 ]; then pass "9c empty saved log exits 0"; else fail "9c" "exit $code: $out"; fi
+count "9c logs API used"            1 "/logs"
 # 8. Bad arguments fail loudly.
 run "8 unknown result"              none 2 bogus
 : > "$GH_LOG"

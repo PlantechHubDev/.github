@@ -5,7 +5,8 @@
 # result (needs.mutation.result). A red nightly must reach someone (.github#33):
 #   failure, cancelled  open one issue "mutation-nightly red: <repo>" (labels bug,
 #                       area:test-infra, priority:P1) naming the failing step, the run
-#                       link and the last 30 log lines of the failing step; when that
+#                       link and the last 30 log lines (the saved PIT log, else the
+#                       failing step's from the logs API); when that
 #                       issue is already open, comment on it instead.
 #   success             close the open issue, if any, with a link to the green run.
 #   skipped             nothing.
@@ -88,7 +89,7 @@ fi
   printf 'The nightly mutation run ended `%s`.\n\n' "$result"
   printf -- '- **Run:** %s\n' "$run_url"
   printf -- '- **Failing step:** %s\n\n' "$step"
-  printf "Last 30 lines of the failing step's log:\n\n~~~~text\n"
+  printf "Last 30 lines of the log:\n\n~~~~text\n"
   cat "$tmp/tail.log"
   printf '~~~~\n\n'
   printf 'While the nightly is red the last tested commit does not move, so the next run covers a wider range. The next green run closes this issue.\n'
