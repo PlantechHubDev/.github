@@ -45,10 +45,16 @@ repo README.md src/main/resources/app.yml
 run "1 docs-only skips"                0 ok
 notcalled "1 PIT not run"
 has "1 says why"                       "No changed Java class to mutate"
-# 2. A test named after no production class: skipped (.github#31's mapping).
+# 2. Test-only change with no matching class, and the test is green under Gradle but red under
+#    PIT (orchestration-service#596): PIT still runs, on a probe class, and the check fails.
 repo src/test/java/a/b/HelperTest.java
-run "2 unmapped test skips"            0 ok
-notcalled "2 PIT not run"
+run "2 test-only PIT failure fails"    1 green
+called "2 probe class in test's package" '-PpitestTargetClasses=a.b.C'
+has "2 says it is a probe"             "probe"
+# 2b. build.gradle only (e.g. a new test-task system property): PIT runs on a probe class.
+repo build.gradle
+run "2b build-only passes when green"  0 ok
+called "2b probe class"                '-PpitestTargetClasses=a.b.C'
 # 3. Production change with surviving mutants: PIT runs on that class only, survivors pass.
 repo src/main/java/a/b/C.java
 run "3 survivors pass"                 0 ok
@@ -72,6 +78,10 @@ repo src/main/java/a/b/D.java
 git -C "$REPO" rm -q src/main/java/a/b/C.java; git -C "$REPO" commit -qm delete
 run "7 deleted class not targeted"     0 ok
 called "7 only D targeted"             '-PpitestTargetClasses=a.b.D,a.b.D$*'
+# 9. Gradle fails after PIT wrote its report: the exit code wins, the check fails.
+repo src/main/java/a/b/C.java
+run "9 report then failure fails"      1 okfail
+has "9 names the cause"                "PIT or Gradle error (exit 1)"
 # 8. No base: usage error, never a silent pass.
 : > "$GRADLE_LOG"
 out=$(cd "$REPO" && bash "$CHECK" 2>&1); code=$?

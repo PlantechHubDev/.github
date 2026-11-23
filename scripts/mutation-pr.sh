@@ -9,8 +9,10 @@
 # nightly's target mapping (`mutation-survivors.py targets --root .`). It fails ONLY when PIT
 # cannot run: tests fail under PIT without mutation, a PIT or Gradle error, or no report when
 # mutations were found (`mutation-survivors.py pit-result`). Surviving mutants never fail it;
-# they are counted in a notice and left to the nightly. A PR that changes no class to mutate
-# (docs, resources, tests named after no class, deletions) skips PIT and passes.
+# they are counted in a notice and left to the nightly. When no changed class maps but a
+# test or build file changed, PIT runs on one probe class (`targets` prints it) so its
+# green-suite check still runs. A PR with neither (docs, main resources, workflows,
+# deletions) skips PIT and passes.
 # Env: PACKAGES_USER, PACKAGES_TOKEN (GitHub Packages for the Gradle build). Exit 2: usage.
 set -euo pipefail
 
@@ -25,8 +27,15 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 git diff --name-only --diff-filter=d "$base...HEAD" > "$tmp/changed.txt"
 python3 "$here/mutation-survivors.py" targets --changed "$tmp/changed.txt" --root . > "$tmp/targets.out"
 targets=$(sed -n 's/^targets=//p' "$tmp/targets.out")
-if [ -z "$targets" ]; then
-  echo "No changed Java class to mutate (docs, resources, tests named after no class, or deletions only): skipping PIT."
+probe=$(sed -n 's/^probe=//p' "$tmp/targets.out")
+if [ -z "$targets" ] && [ -n "$probe" ]; then
+  # Tests or build files changed but no class maps (orchestration-service#596 changed only
+  # tests and build.gradle). PIT's green-suite check runs the whole test suite whatever the
+  # target, so one probe class is enough to catch a test that is red only under PIT.
+  echo "No changed class to mutate, but tests or build files changed: running PIT on probe class $probe for its green-suite check."
+  targets=$probe
+elif [ -z "$targets" ]; then
+  echo "No changed Java class to mutate and no test or build file changed: skipping PIT."
   exit 0
 fi
 echo "PIT targets: $targets"

@@ -9,14 +9,25 @@
 #     secrets:
 #       PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
 #
+#   ci-ok:
+#     needs: [checks, build, paired-tests, mutation]
+#     ...
+#       with:
+#         jobs: ${{ toJSON(needs) }}
+#         allowed-skips: ${{ github.actor == 'dependabot[bot]' && 'build,mutation' || '' }}
+#
+# The job skips only on Dependabot runs (no secrets there). Allow the skip only on those runs,
+# as above, so a skip from any other cause turns ci-ok red instead of passing silently.
+#
 # It runs PIT on the classes the PR changed, with the nightly's target mapping and the same
 # Gradle `pitest` task the nightly runs (see mutation-nightly.yml for what the build must
 # declare; the build MUST NOT set PIT's mutationThreshold or coverageThreshold). It fails
 # only when PIT cannot run: tests fail under PIT without mutation (for example a test that
 # relies on a system property only Gradle's `test` task sets), a PIT or Gradle error, or no
 # report when mutations were found. Surviving mutants never fail it; the nightly files them.
-# It skips PIT and passes when the PR changes no class to mutate. On merge_group it diffs
-# against the queue's base. Work is in scripts/mutation-pr.sh.
+# When no changed class maps but a test or build file changed, it runs PIT on one probe
+# class so the green-suite check still runs; with neither it skips PIT and passes. On
+# merge_group it diffs against the queue's base. Work is in scripts/mutation-pr.sh.
 #
 # It is a separate workflow, not a job in java-service-ci.yml, so java libraries (which call
 # java-library-ci.yml) use the same check, and adopting it moves no other pin.

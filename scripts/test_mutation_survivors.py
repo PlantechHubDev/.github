@@ -33,7 +33,34 @@ class TargetsTest(unittest.TestCase):
             f.write("\n".join(paths) + "\n")
         r = run("targets", "--changed", changed, "--root", root)
         self.assertEqual(r.returncode, 0, r.stderr)
-        return r.stdout.splitlines()
+        self.last_probe = r.stdout.splitlines()[2]
+        return r.stdout.splitlines()[:2]
+
+    def probe(self, paths, existing=None):
+        self.targets(paths, existing)
+        return self.last_probe
+
+    # probe: when no class maps but tests or build files changed, one production class for the
+    # PR check to run PIT on, so PIT's green-suite check still runs (orchestration-service#596
+    # changed only tests and build.gradle).
+    def test_probe_same_package_class_for_unmapped_test(self):
+        self.assertEqual(self.probe(["src/test/java/a/b/NoSuchThingTest.java"]), "probe=a.b.C")
+
+    def test_probe_first_class_for_build_file_only(self):
+        self.assertEqual(self.probe(["build.gradle"]), "probe=a.E")
+
+    def test_probe_for_test_resources_and_gradle_dir(self):
+        self.assertEqual(self.probe(["src/test/resources/pact/x.json"]), "probe=a.E")
+        self.assertEqual(self.probe(["gradle/libs.versions.toml"]), "probe=a.E")
+
+    def test_no_probe_for_docs_or_main_resources(self):
+        self.assertEqual(self.probe(["README.md", "src/main/resources/app.yml", ".github/workflows/ci.yml"]), "probe=")
+
+    def test_no_probe_when_targets_found(self):
+        self.assertEqual(self.probe(["src/main/java/a/b/C.java", "build.gradle"]), "probe=")
+
+    def test_no_probe_without_production_classes(self):
+        self.assertEqual(self.probe(["build.gradle"], existing=[]), "probe=")
 
     def test_test_file_without_main_class_dropped(self):
         # 2026-11-18: OrchestrationDebtFieldsPassThroughTest mapped to a class that does not exist.

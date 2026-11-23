@@ -6,7 +6,12 @@ Usage:
   mutation-survivors.py survivors --mutations <mutations.xml> --repo <name> --sha <sha>
                                   [--diff <unified-diff> --whole <globs>]
 
-targets prints two lines: "targets=<comma globs>" and "whole=<comma globs>".
+targets prints three lines: "targets=<comma globs>", "whole=<comma globs>" and
+"probe=<fqcn or empty>". probe is set only when targets is empty and a test or
+build file changed (src/test/, build.gradle*, settings.gradle*,
+gradle.properties, gradle/): one production class, in the first changed
+test's package if it has one, so the PR check can still run PIT's
+green-suite check. The nightly ignores it.
   src/main/java/a/b/C.java            -> a.b.C,a.b.C$*  (not a.b.C*: that matches a.b.CustomerService)
   src/test/java/a/b/CTest.java        -> a.b.C,a.b.C$*  (also whole-class)
   src/test/java/a/b/CProperties.java  -> a.b.C,a.b.C$*  (also whole-class)
@@ -83,6 +88,40 @@ def cmd_targets(args):
                     whole.append(glob)
     print("targets=" + ",".join(targets))
     print("whole=" + ",".join(whole))
+    print("probe=" + (probe_class(args.root, paths) if not targets else ""))
+
+
+PROBE_RE = re.compile(r"^(src/test/|build\.gradle|settings\.gradle|gradle\.properties$|gradle/)")
+
+
+def production_classes(root, package=""):
+    base = os.path.join(root, "src/main/java")
+    found = []
+    for dirpath, _, files in os.walk(os.path.join(base, package.replace(".", "/"))):
+        if package and dirpath != os.path.join(base, package.replace(".", "/")):
+            continue
+        for name in files:
+            if name.endswith(".java") and name != "package-info.java":
+                rel = os.path.relpath(os.path.join(dirpath, name), base)
+                found.append(to_fqcn(rel[: -len(".java")]))
+    return sorted(found)
+
+
+def probe_class(root, paths):
+    """One production class for the PR check to run PIT on when no changed class maps but
+    tests or build files changed, so PIT's green-suite check still runs: a class in the
+    package of the first changed test, else the first class of the project, else none."""
+    changed = [p for p in paths if PROBE_RE.match(p)]
+    if not changed:
+        return ""
+    for p in changed:
+        m = re.match(r"^src/test/java/(.+)/[^/]+\.java$", p)
+        if m:
+            same = production_classes(root, to_fqcn(m.group(1)))
+            if same:
+                return same[0]
+    every = production_classes(root)
+    return every[0] if every else ""
 
 
 GREEN_SUITE_FAILED = "did not pass without mutation"
