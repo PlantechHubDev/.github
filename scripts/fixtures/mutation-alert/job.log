@@ -42,6 +42,8 @@
 2026-11-19T07:06:40.5000000Z log line 40
 2026-11-19T07:09:58.0000000Z ```
 2026-11-19T07:09:59.9000000Z ##[error]PIT could not run: tests fail under PIT without mutation
+2026-11-19T07:09:59.9200000Z ##[error]Process completed with exit code 1.
+2026-11-19T07:09:59.9500000Z ##[group]Run actions/upload-artifact@sha
 2026-11-19T07:10:01.0000000Z Post job cleanup noise 1
 2026-11-19T07:10:02.0000000Z Post job cleanup noise 2
 2026-11-19T07:10:03.0000000Z Post job cleanup noise 3

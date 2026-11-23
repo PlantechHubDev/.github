@@ -4,5 +4,5 @@
    {"name":"Find what changed","conclusion":"success","number":4,"started_at":"2026-11-19T07:01:00Z","completed_at":"2026-11-19T07:01:59Z"},
    {"name":"Run PIT","conclusion":"failure","number":7,"started_at":"2026-11-19T07:02:00Z","completed_at":"2026-11-19T07:09:59Z"},
    {"name":"Find survivors","conclusion":"skipped","number":8,"started_at":null,"completed_at":null},
-   {"name":"Upload the PIT report","conclusion":"success","number":12,"started_at":"2026-11-19T07:10:00Z","completed_at":"2026-11-19T07:10:30Z"}]},
+   {"name":"Upload the PIT report","conclusion":"success","number":12,"started_at":"2026-11-19T07:09:59Z","completed_at":"2026-11-19T07:10:30Z"}]},
  {"id":9002,"name":"mutation / alert","conclusion":null,"steps":[]}]}

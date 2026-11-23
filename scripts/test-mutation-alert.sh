@@ -45,10 +45,16 @@ body  "1 fence survives backticks"  '~~~~'
 nobody "1 post-step lines cut"     "Post job cleanup"
 nobody "1 earlier steps cut"        "changes line"
 count "1 lookup by title, not label" 0 "issue list --repo $R --state open --label"
+count "1 lookup by title search"    1 'issue list --repo example/example-service --state open --search in:title "mutation-nightly red: example-service"'
+nobody "1 next step in same second cut" "upload-artifact"
+count "1 search-lag fallback list"   1 "issue list --repo $R --state open --limit 1000 --json number,title"
+body  "1 step exit line kept"       "Process completed with exit code 1."
+body  "1 heading names the step"    "Last 30 lines of the failing step's log"
 # 2. Second failure: one comment on #42, no new issue.
 run "2 failure, #42 open"           open 0 failure
 count "2 no create"                 0 "issue create"
 count "2 comment on #42"            1 "issue comment 42"
+count "2 no fallback when found"     0 "--limit 1000"
 body  "2 comment names step"        'Run PIT'
 # 3. Cancelled or timed out counts as red.
 run "3 cancelled, none open"        none 0 cancelled

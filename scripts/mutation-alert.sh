@@ -30,6 +30,11 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # By title, not label: a relabelled red issue must still be found, never duplicated.
 gh issue list --repo "$repo" --state open --search "in:title \"$title\"" --limit 100 --json number,title > "$tmp/open.json"
 open=$(jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty' "$tmp/open.json")
+if [ -z "$open" ]; then
+  # Search can lag a just-created issue by seconds; confirm with a plain list before creating.
+  gh issue list --repo "$repo" --state open --limit 1000 --json number,title > "$tmp/open.json"
+  open=$(jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty' "$tmp/open.json")
+fi
 
 if [ "$result" = success ]; then
   if [ -n "$open" ]; then
@@ -59,6 +64,13 @@ if [ -n "$job_id" ] && gh api "repos/$repo/actions/jobs/$job_id/logs" > "$tmp/jo
     # Log lines start with an ISO timestamp; compare to the second (YYYY-MM-DDTHH:MM:SS).
     awk -v from="${from:0:19}" -v to="${to:0:19}" '{ t = substr($1, 1, 19) } t >= from && t <= to' "$tmp/job.log" > "$tmp/step.log"
   fi
+  # The next step can start in the failing step's last second: cut after the step's last
+  # ##[error] line (a failed step ends with "Process completed with exit code N.").
+  if [ -s "$tmp/step.log" ] && grep -q '##\[error\]' "$tmp/step.log"; then
+    last=$(grep -n '##\[error\]' "$tmp/step.log" | tail -n 1 | cut -d: -f1)
+    head -n "$last" "$tmp/step.log" > "$tmp/step-cut.log"
+    mv "$tmp/step-cut.log" "$tmp/step.log"
+  fi
   if [ -s "$tmp/step.log" ]; then src="$tmp/step.log"; else src="$tmp/job.log"; fi
   tail -n 30 "$src" | cut -c1-500 > "$tmp/tail.log"
 else
@@ -70,7 +82,7 @@ fi
   printf 'The nightly mutation run ended `%s`.\n\n' "$result"
   printf -- '- **Run:** %s\n' "$run_url"
   printf -- '- **Failing step:** %s\n\n' "$step"
-  printf 'Last 30 lines of the mutation job log:\n\n~~~~text\n'
+  printf "Last 30 lines of the failing step's log:\n\n~~~~text\n"
   cat "$tmp/tail.log"
   printf '~~~~\n\n'
   printf 'While the nightly is red the last tested commit does not move, so the next run covers a wider range. The next green run closes this issue.\n'
