@@ -1,0 +1,9 @@
+> Task :pitest
+16:02:11 PIT >> INFO : Verbose logging is disabled. If you encounter a problem, please enable it before reporting an issue.
+16:02:14 PIT >> INFO : Created 0 mutation test units in pre scan
+16:02:14 PIT >> INFO : Sending 0 test classes to minion
+16:02:20 PIT >> INFO : Calculated coverage in 6 seconds.
+16:02:20 PIT >> INFO : Created 0 mutation test units
+16:02:20 PIT >> WARN : No mutations found. This probably means there is an issue with either the supplied classpath or filters.
+
+BUILD SUCCESSFUL in 41s
