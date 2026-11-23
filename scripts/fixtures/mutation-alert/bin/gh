@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Stub for `gh`, used by scripts/test-mutation-alert.sh. Appends each call's argv (one line)
 # to $GH_LOG and serves recorded data from the case directory $MA_CASE:
+#   issue list --search ...                      -> $MA_CASE/search-issues.json if present, else open-issues.json
 #   issue list ...                               -> $MA_CASE/open-issues.json (with --jq applied)
 #   api repos/<o>/<r>/actions/runs/<id>/jobs...  -> ../jobs.json
 #   api repos/<o>/<r>/actions/jobs/<id>/logs     -> ../job.log (absent: HTTP 404)
@@ -19,6 +20,8 @@ serve() {
   if [ -n "$jqf" ]; then jq -r "$jqf" "$1"; else cat "$1"; fi
 }
 case "$args" in
+  " issue list "*"--search"*)
+    if [ -f "${MA_CASE:?}/search-issues.json" ]; then serve "$MA_CASE/search-issues.json"; else serve "$MA_CASE/open-issues.json"; fi ;;
   " issue list "*) serve "${MA_CASE:?}/open-issues.json" ;;
   *"/actions/runs/"*"/jobs"*) serve "$D/jobs.json" ;;
   *"/actions/jobs/"*"/logs "*) serve "${MA_LOG:-$D/job.log}" ;;

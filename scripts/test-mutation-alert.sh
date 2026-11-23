@@ -56,6 +56,10 @@ count "2 no create"                 0 "issue create"
 count "2 comment on #42"            1 "issue comment 42"
 count "2 no fallback when found"     0 "--limit 1000"
 body  "2 comment names step"        'Run PIT'
+# 2b. Search has not indexed #42 yet (it lags new issues): the plain list finds it, no duplicate.
+run "2b failure, search lags"       lagging 0 failure
+count "2b no create"                0 "issue create"
+count "2b comment on #42"           1 "issue comment 42"
 # 3. Cancelled or timed out counts as red.
 run "3 cancelled, none open"        none 0 cancelled
 count "3 one create"                1 "issue create"
@@ -67,6 +71,7 @@ count "4 close comment links run"   1 "issue close 42 --repo $R --comment The ni
 # 5. Green with none open: no writes.
 run "5 success, none open"          none 0 success
 nowrite "5 nothing written"
+count "5 green skips the fallback list" 0 "--limit 1000"
 # 6. Skipped (mutation job never ran): no calls at all.
 run "6 skipped"                     none 0 skipped
 count "6 no gh calls"               0 " "

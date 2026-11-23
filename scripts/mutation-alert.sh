@@ -30,8 +30,9 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # By title, not label: a relabelled red issue must still be found, never duplicated.
 gh issue list --repo "$repo" --state open --search "in:title \"$title\"" --limit 100 --json number,title > "$tmp/open.json"
 open=$(jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty' "$tmp/open.json")
-if [ -z "$open" ]; then
+if [ -z "$open" ] && [ "$result" != success ]; then
   # Search can lag a just-created issue by seconds; confirm with a plain list before creating.
+  # (A green run that misses a just-created issue closes it on the next green run.)
   gh issue list --repo "$repo" --state open --limit 1000 --json number,title > "$tmp/open.json"
   open=$(jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty' "$tmp/open.json")
 fi
@@ -46,7 +47,7 @@ if [ "$result" = success ]; then
   exit 0
 fi
 
-# Red: name the failing step and quote the end of the mutation job's log.
+# Red: name the failing step and quote the end of its log.
 # The logs API returns the whole job; later steps (report upload, post-job cleanup) would
 # push the failure out of the last 30 lines, so keep only the failing step's time window.
 step="unknown (see the run)"
