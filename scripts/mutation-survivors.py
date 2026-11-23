@@ -16,11 +16,15 @@ targets prints two lines: "targets=<comma globs>" and "whole=<comma globs>".
   defaults to the current directory.
 
 pit-result --rc <gradle exit> --log <gradle output> --mutations <mutations.xml>
+           [--whole-project]
   decides whether PIT ran. Prints "result=ok|no-mutations|cannot-run" and
   "reason=<text>". Exit 0 for ok and no-mutations (zero survivors: PIT found
   nothing to mutate and wrote no report), 1 for cannot-run (tests fail under
   PIT without mutation, a PIT or Gradle error, or no report when mutations
-  were found).
+  were found). With --whole-project (no target classes given), finding no
+  mutations is cannot-run: the classpath or the targetClasses glob is wrong.
+  Any non-zero Gradle exit is cannot-run, so callers MUST NOT set PIT's
+  mutationThreshold or coverageThreshold: survivors never fail a run.
 
 survivors prints a JSON array of {class, title, body}, one item per outer
 production class. SURVIVED and NO_COVERAGE both count as survivors (no test
@@ -82,10 +86,10 @@ def cmd_targets(args):
 
 
 GREEN_SUITE_FAILED = "did not pass without mutation"
-NO_MUTATIONS = "No mutations found"
+NO_MUTATIONS_RE = re.compile(r"PIT >> WARN : No mutations found")
 
 
-def pit_verdict(rc, log, report_exists):
+def pit_verdict(rc, log, report_exists, whole_project=False):
     """Return (result, reason). Survivors never matter here, only whether PIT ran."""
     if rc != 0:
         if GREEN_SUITE_FAILED in log:
@@ -93,7 +97,10 @@ def pit_verdict(rc, log, report_exists):
         return "cannot-run", f"PIT or Gradle error (exit {rc})"
     if report_exists:
         return "ok", "PIT wrote its report"
-    if NO_MUTATIONS in log:
+    if NO_MUTATIONS_RE.search(log):
+        if whole_project:
+            # Nothing to mutate in the whole project means the classpath or globs are wrong.
+            return "cannot-run", "PIT found no mutations in the whole project"
         return "no-mutations", "PIT found nothing to mutate (zero survivors)"
     return "cannot-run", "PIT wrote no report"
 
@@ -104,7 +111,7 @@ def cmd_pit_result(args):
             log = f.read()
     except OSError as e:
         raise InputProblem(f"cannot read {args.log}: {e}")
-    result, reason = pit_verdict(args.rc, log, os.path.isfile(args.mutations))
+    result, reason = pit_verdict(args.rc, log, os.path.isfile(args.mutations), args.whole_project)
     print(f"result={result}")
     print(f"reason={reason}")
     return 1 if result == "cannot-run" else 0
@@ -237,6 +244,7 @@ def main():
     r.add_argument("--rc", required=True, type=int)
     r.add_argument("--log", required=True)
     r.add_argument("--mutations", required=True)
+    r.add_argument("--whole-project", action="store_true")
     s = sub.add_parser("survivors")
     s.add_argument("--mutations", required=True)
     s.add_argument("--repo", required=True)

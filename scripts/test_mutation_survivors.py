@@ -151,14 +151,24 @@ class SurvivorsTest(unittest.TestCase):
 class PitResultTest(unittest.TestCase):
     """pit-result tells "PIT could not run" from "PIT ran" (.github#31, #32)."""
 
-    def pit_result(self, rc, log, report):
+    def pit_result(self, rc, log, report, *extra):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         mutations = os.path.join(d, "mutations.xml")
         if report:
             shutil.copy(MUTATIONS, mutations)
-        r = run("pit-result", "--rc", str(rc), "--log", os.path.join(FIX, log), "--mutations", mutations)
+        r = run("pit-result", "--rc", str(rc), "--log", os.path.join(FIX, log), "--mutations", mutations, *extra)
         return r.returncode, r.stdout.splitlines()
+
+    def test_whole_project_with_no_mutations_cannot_run(self):
+        # A full run that finds nothing means the classpath or targetClasses glob is wrong.
+        rc, out = self.pit_result(0, "pit-no-mutations.log", False, "--whole-project")
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=PIT found no mutations in the whole project"]))
+
+    def test_phrase_outside_pit_logger_does_not_count(self):
+        # Test output that merely mentions the phrase must not turn a missing report into zero survivors.
+        rc, out = self.pit_result(0, "pit-phrase-in-test-output.log", False)
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=PIT wrote no report"]))
 
     def test_report_present_is_ok(self):
         rc, out = self.pit_result(0, "pit-ok.log", report=True)

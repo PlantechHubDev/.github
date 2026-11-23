@@ -22,8 +22,10 @@
 # failWhenNoMutations = false, so a night whose changed classes have nothing to mutate
 # (interfaces, enums) does not fail and stall the recorded SHA. Such a night writes no
 # report; `mutation-survivors.py pit-result` reads PIT's "No mutations found" line and
-# counts it as zero survivors. A missing report without that line, tests failing under
-# PIT without mutation, or any Gradle error fails the run.
+# counts it as zero survivors (on a full run, where the whole project has nothing to
+# mutate, it fails instead). A missing report without that line, tests failing under PIT
+# without mutation, or any Gradle error fails the run, so the build MUST NOT set PIT's
+# mutationThreshold or coverageThreshold: survivors never fail a run.
 #
 # A changed test whose production class does not exist (a test named after no class)
 # is dropped from the targets, so a night with only such changes skips PIT.
@@ -170,8 +172,12 @@ jobs:
           ./gradlew "$@" 2>&1 | tee "$RUNNER_TEMP/pit.log"
           rc=${PIPESTATUS[0]}
           set -e
+          set -- --rc "$rc" --log "$RUNNER_TEMP/pit.log" --mutations build/reports/pitest/mutations.xml
+          if [ -z "$TARGETS" ]; then
+            set -- "$@" --whole-project
+          fi
           verdict=0
-          python3 .pth-checks/scripts/mutation-survivors.py pit-result --rc "$rc" --log "$RUNNER_TEMP/pit.log" --mutations build/reports/pitest/mutations.xml > "$RUNNER_TEMP/pit-result.out" || verdict=$?
+          python3 .pth-checks/scripts/mutation-survivors.py pit-result "$@" > "$RUNNER_TEMP/pit-result.out" || verdict=$?
           cat "$RUNNER_TEMP/pit-result.out"
           result=$(sed -n 's/^result=//p' "$RUNNER_TEMP/pit-result.out")
           reason=$(sed -n 's/^reason=//p' "$RUNNER_TEMP/pit-result.out")

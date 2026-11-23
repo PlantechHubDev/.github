@@ -1,0 +1,6 @@
+> Task :pitest
+09:20:02 PIT >> INFO : Created 3 mutation test units in pre scan
+stdout: asserting the message "No mutations found" is shown to the user
+09:20:41 PIT >> INFO : Created 3 mutation test units
+
+BUILD SUCCESSFUL in 1m 2s
