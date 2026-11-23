@@ -86,7 +86,8 @@ def cmd_targets(args):
 
 
 GREEN_SUITE_FAILED = "did not pass without mutation"
-NO_MUTATIONS_RE = re.compile(r"PIT >> WARN : No mutations found")
+# PIT logs this at java.util.logging WARNING, e.g. "7:13:35 AM PIT >> WARNING : No mutations found. ..."
+NO_MUTATIONS_RE = re.compile(r"PIT >> WARNING : No mutations found")
 
 
 def pit_verdict(rc, log, report_exists, whole_project=False):

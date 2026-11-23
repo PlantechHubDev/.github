@@ -1,7 +1,7 @@
 > Task :pitest
-09:20:02 PIT >> INFO : Created 3 mutation test units in pre scan
-09:20:40 PIT >> INFO : Calculated coverage in 38 seconds.
-09:20:41 PIT >> INFO : Created 3 mutation test units
+9:20:02 AM PIT >> INFO : Created 3 mutation test units in pre scan
+9:20:40 AM PIT >> INFO : Calculated coverage in 38 seconds.
+9:20:41 AM PIT >> INFO : Created 3 mutation test units
 ================================================================================
 - Statistics
 ================================================================================

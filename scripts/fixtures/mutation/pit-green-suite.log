@@ -1,8 +1,8 @@
 > Task :pitest
-09:14:02 PIT >> INFO : Created 1 mutation test units in pre scan
-09:14:40 PIT >> SEVERE : Description [testClass=com.example.contracts.FixtureTest, name=pilotContractsVerify()] did not pass without mutation.
+7:13:53 AM PIT >> SEVERE : Description [testClass=com.example.contracts.FixtureTest, name=[engine:junit-jupiter]/[class:com.example.contracts.FixtureTest]/[method:pilotContractsVerify()]] did not pass without mutation.
+7:13:53 AM PIT >> SEVERE : Description [testClass=com.example.contracts.FixtureTest, name=[engine:junit-jupiter]/[class:com.example.contracts.FixtureTest]/[method:pendingMatchIsReportedAsVerified()]] did not pass without mutation.
 Exception in thread "main" org.pitest.help.PitHelpError: 2 tests did not pass without mutation when calculating line coverage. Mutation testing requires a green suite.
 
 > Task :pitest FAILED
 
-FAILURE: Build failed with an exception.
+BUILD FAILED in 1m 9s
