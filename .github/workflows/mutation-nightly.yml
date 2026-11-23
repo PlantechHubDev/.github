@@ -47,7 +47,7 @@
 # Red nightly alert (job `alert`, after `mutation`, scripts/mutation-alert.sh): a failed or
 # cancelled run opens one issue "mutation-nightly red: <repo>" (labels bug, area:test-infra,
 # priority:P1) with the failing step and the run link, or comments on that issue when it is
-# already open. When Run PIT or the forced step failed it quotes the last 30 lines of the PIT
+# already open. When Run PIT or the forced step failed (or Run PIT was cancelled) it quotes the last 30 lines of the PIT
 # log (artifact mutation-failure-log); otherwise it tries the logs API, which may not serve a
 # running run's log. The next green run closes it.
 
@@ -273,7 +273,7 @@ jobs:
           MASK: ${{ secrets.PUBLISH_TOKEN }}
         run: |
           if [ -s "$RUNNER_TEMP/pit.log" ]; then
-            tail -n 30 "$RUNNER_TEMP/pit.log" | awk 'ENVIRON["MASK"] != "" { m = ENVIRON["MASK"]; while ((i = index($0, m)) > 0) $0 = substr($0, 1, i - 1) "***" substr($0, i + length(m)) } 1' > "$RUNNER_TEMP/mutation-failure.log"
+            tail -n 30 "$RUNNER_TEMP/pit.log" | awk 'ENVIRON["MASK"] != "" { m = ENVIRON["MASK"]; o = ""; s = $0; while ((i = index(s, m)) > 0) { o = o substr(s, 1, i - 1) "***"; s = substr(s, i + length(m)) } $0 = o s } 1' > "$RUNNER_TEMP/mutation-failure.log"
           fi
 
       - name: Upload the failure log
