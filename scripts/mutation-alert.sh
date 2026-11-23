@@ -5,7 +5,7 @@
 # result (needs.mutation.result). A red nightly must reach someone (.github#33):
 #   failure, cancelled  open one issue "mutation-nightly red: <repo>" (labels bug,
 #                       area:test-infra, priority:P1) naming the failing step, the run
-#                       link and the last 30 log lines of the mutation job; when that
+#                       link and the last 30 log lines of the failing step; when that
 #                       issue is already open, comment on it instead.
 #   success             close the open issue, if any, with a link to the green run.
 #   skipped             nothing.
@@ -27,7 +27,8 @@ esac
 title="mutation-nightly red: ${repo#*/}"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-gh issue list --repo "$repo" --state open --label bug --limit 1000 --json number,title > "$tmp/open.json"
+# By title, not label: a relabelled red issue must still be found, never duplicated.
+gh issue list --repo "$repo" --state open --search "in:title \"$title\"" --limit 100 --json number,title > "$tmp/open.json"
 open=$(jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty' "$tmp/open.json")
 
 if [ "$result" = success ]; then
@@ -41,16 +42,25 @@ if [ "$result" = success ]; then
 fi
 
 # Red: name the failing step and quote the end of the mutation job's log.
+# The logs API returns the whole job; later steps (report upload, post-job cleanup) would
+# push the failure out of the last 30 lines, so keep only the failing step's time window.
 step="unknown (see the run)"
-job_id=""
+job_id="" from="" to=""
 if gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" > "$tmp/jobs.json" 2>/dev/null; then
   job_id=$(jq -r '[.jobs[] | select(.name | test("(^|/ )mutation$")) | select(.conclusion != "success")][0].id // empty' "$tmp/jobs.json")
   if [ -n "$job_id" ]; then
-    step=$(jq -r --argjson id "$job_id" '[.jobs[] | select(.id == $id) | .steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name][0] // "unknown (see the run)"' "$tmp/jobs.json")
+    jq -r --argjson id "$job_id" '[.jobs[] | select(.id == $id) | .steps[] | select(.conclusion == "failure" or .conclusion == "cancelled")][0] // {} | .name // "", .started_at // "", .completed_at // ""' "$tmp/jobs.json" > "$tmp/step.txt"
+    { read -r name; read -r from; read -r to; } < "$tmp/step.txt"
+    [ -n "$name" ] && step=$name
   fi
 fi
 if [ -n "$job_id" ] && gh api "repos/$repo/actions/jobs/$job_id/logs" > "$tmp/job.log" 2>/dev/null && [ -s "$tmp/job.log" ]; then
-  tail -n 30 "$tmp/job.log" | cut -c1-500 > "$tmp/tail.log"
+  if [ -n "$from" ] && [ -n "$to" ]; then
+    # Log lines start with an ISO timestamp; compare to the second (YYYY-MM-DDTHH:MM:SS).
+    awk -v from="${from:0:19}" -v to="${to:0:19}" '{ t = substr($1, 1, 19) } t >= from && t <= to' "$tmp/job.log" > "$tmp/step.log"
+  fi
+  if [ -s "$tmp/step.log" ]; then src="$tmp/step.log"; else src="$tmp/job.log"; fi
+  tail -n 30 "$src" | cut -c1-500 > "$tmp/tail.log"
 else
   echo "(log unavailable: open the run)" > "$tmp/tail.log"
 fi

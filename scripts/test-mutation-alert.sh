@@ -42,6 +42,9 @@ body  "1 last log line"             "tests fail under PIT without mutation"
 body  "1 log tail kept"             "log line 40"
 nobody "1 log cut to 30 lines"      "log line 12"
 body  "1 fence survives backticks"  '~~~~'
+nobody "1 post-step lines cut"     "Post job cleanup"
+nobody "1 earlier steps cut"        "changes line"
+count "1 lookup by title, not label" 0 "issue list --repo $R --state open --label"
 # 2. Second failure: one comment on #42, no new issue.
 run "2 failure, #42 open"           open 0 failure
 count "2 no create"                 0 "issue create"
