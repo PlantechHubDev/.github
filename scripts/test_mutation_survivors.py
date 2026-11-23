@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,13 +18,40 @@ def run(*args):
 
 
 class TargetsTest(unittest.TestCase):
-    def targets(self, paths):
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+    # Production files that exist under the checkout root. A test file's target is
+    # kept only when its production class exists (.github#31).
+    EXISTING = ["src/main/java/a/b/C.java", "src/main/java/a/b/D.java", "src/main/java/a/E.java"]
+
+    def targets(self, paths, existing=None):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        for rel in self.EXISTING if existing is None else existing:
+            os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+            open(os.path.join(root, rel), "w").close()
+        changed = os.path.join(root, "changed.txt")
+        with open(changed, "w") as f:
             f.write("\n".join(paths) + "\n")
-        self.addCleanup(os.unlink, f.name)
-        r = run("targets", "--changed", f.name)
+        r = run("targets", "--changed", changed, "--root", root)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.splitlines()
+
+    def test_test_file_without_main_class_dropped(self):
+        # 2026-11-18: OrchestrationDebtFieldsPassThroughTest mapped to a class that does not exist.
+        out = self.targets(["src/test/java/a/b/NoSuchThingTest.java"])
+        self.assertEqual(out, ["targets=", "whole="])
+
+    def test_test_file_with_main_class_kept(self):
+        out = self.targets(["src/test/java/a/b/CTest.java"])
+        self.assertEqual(out, ["targets=a.b.C,a.b.C$*", "whole=a.b.C,a.b.C$*"])
+
+    def test_existing_main_file_kept(self):
+        # A renamed production class arrives under its new path, which exists.
+        out = self.targets(["src/main/java/a/b/D.java"], existing=["src/main/java/a/b/D.java"])
+        self.assertEqual(out, ["targets=a.b.D,a.b.D$*", "whole="])
+
+    def test_unmapped_dropped_mapped_kept_in_one_change(self):
+        out = self.targets(["src/test/java/a/b/NoSuchThingTest.java", "src/test/java/a/b/CTest.java"])
+        self.assertEqual(out, ["targets=a.b.C,a.b.C$*", "whole=a.b.C,a.b.C$*"])
 
     def test_main_file_maps_to_class_glob(self):
         self.assertEqual(self.targets(["src/main/java/a/b/C.java"]), ["targets=a.b.C,a.b.C$*", "whole="])
@@ -117,6 +145,54 @@ class SurvivorsTest(unittest.TestCase):
 
     def test_missing_mutations_file_exits_2(self):
         r = run("survivors", "--mutations", "/nonexistent.xml", "--repo", "r", "--sha", "s")
+        self.assertEqual(r.returncode, 2)
+
+
+class PitResultTest(unittest.TestCase):
+    """pit-result tells "PIT could not run" from "PIT ran" (.github#31, #32)."""
+
+    def pit_result(self, rc, log, report, *extra):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        mutations = os.path.join(d, "mutations.xml")
+        if report:
+            shutil.copy(MUTATIONS, mutations)
+        r = run("pit-result", "--rc", str(rc), "--log", os.path.join(FIX, log), "--mutations", mutations, *extra)
+        return r.returncode, r.stdout.splitlines()
+
+    def test_whole_project_with_no_mutations_cannot_run(self):
+        # A full run that finds nothing means the classpath or targetClasses glob is wrong.
+        rc, out = self.pit_result(0, "pit-no-mutations.log", False, "--whole-project")
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=PIT found no mutations in the whole project"]))
+
+    def test_phrase_outside_pit_logger_does_not_count(self):
+        # Test output that merely mentions the phrase must not turn a missing report into zero survivors.
+        rc, out = self.pit_result(0, "pit-phrase-in-test-output.log", False)
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=PIT wrote no report"]))
+
+    def test_report_present_is_ok(self):
+        rc, out = self.pit_result(0, "pit-ok.log", report=True)
+        self.assertEqual((rc, out[0]), (0, "result=ok"))
+
+    def test_no_report_with_no_mutations_found_is_zero_survivors(self):
+        rc, out = self.pit_result(0, "pit-no-mutations.log", report=False)
+        self.assertEqual((rc, out[0]), (0, "result=no-mutations"))
+
+    def test_no_report_otherwise_cannot_run(self):
+        rc, out = self.pit_result(0, "pit-ok.log", report=False)
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=PIT wrote no report"]))
+
+    def test_green_suite_failure_cannot_run(self):
+        rc, out = self.pit_result(1, "pit-green-suite.log", report=False)
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=tests fail under PIT without mutation"]))
+
+    def test_other_gradle_failure_cannot_run(self):
+        # A compile error or a dead minion JVM: Gradle fails before or during PIT.
+        rc, out = self.pit_result(1, "pit-ok.log", report=True)
+        self.assertEqual((rc, out), (1, ["result=cannot-run", "reason=PIT or Gradle error (exit 1)"]))
+
+    def test_unreadable_log_exits_2(self):
+        r = run("pit-result", "--rc", "0", "--log", "/nonexistent.log", "--mutations", "/nonexistent.xml")
         self.assertEqual(r.returncode, 2)
 
 

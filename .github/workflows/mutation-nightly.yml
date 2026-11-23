@@ -20,7 +20,15 @@
 # globs from -PpitestTargetClasses (none means the whole project) and writes
 # build/reports/pitest/mutations.xml (timestampedReports = false). It SHOULD set
 # failWhenNoMutations = false, so a night whose changed classes have nothing to mutate
-# (interfaces, enums) does not fail and stall the recorded SHA.
+# (interfaces, enums) does not fail and stall the recorded SHA. Such a night writes no
+# report; `mutation-survivors.py pit-result` reads PIT's "No mutations found" line and
+# counts it as zero survivors (on a full run, where the whole project has nothing to
+# mutate, it fails instead). A missing report without that line, tests failing under PIT
+# without mutation, or any Gradle error fails the run, so the build MUST NOT set PIT's
+# mutationThreshold or coverageThreshold: survivors never fail a run.
+#
+# A changed test whose production class does not exist (a test named after no class)
+# is dropped from the targets, so a night with only such changes skips PIT.
 #
 # Each night it runs PIT only on what changed on develop since the last successful run
 # (the `mutation-state` artifact holds that run's SHA). With no recorded SHA, an expired
@@ -43,7 +51,7 @@ on:
       checks-ref:
         description: Tag of PlantechHubDev/.github whose scripts this run uses (mutation-survivors.py). A reusable workflow cannot read its own ref, so the default is bumped in each release; callers normally leave it.
         type: string
-        default: v2.4.0
+        default: v2.7.0
     secrets:
       PUBLISH_TOKEN:
         description: Reads com.plantechhub packages from GitHub Packages (Maven) during the Gradle build.
@@ -125,12 +133,12 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          python3 .pth-checks/scripts/mutation-survivors.py targets --changed "$changed" > "$RUNNER_TEMP/targets.out"
+          python3 .pth-checks/scripts/mutation-survivors.py targets --changed "$changed" --root . > "$RUNNER_TEMP/targets.out"
           cat "$RUNNER_TEMP/targets.out"
           targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/targets.out")
           whole=$(sed -n 's/^whole=//p' "$RUNNER_TEMP/targets.out")
           if [ -z "$targets" ]; then
-            echo "No changed Java class to mutate (resources, test helpers or deletions only): skipping PIT."
+            echo "No changed Java class to mutate (resources, test helpers, tests named after no class, or deletions only): skipping PIT."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -149,20 +157,43 @@ jobs:
         uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Run PIT
+        id: pit
         if: steps.changes.outputs.run == 'true'
         env:
           PACKAGES_USER: ${{ github.actor }}
           PACKAGES_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           TARGETS: ${{ steps.changes.outputs.targets }}
         run: |
+          set -- -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" pitest
           if [ -n "$TARGETS" ]; then
-            ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" pitest "-PpitestTargetClasses=$TARGETS"
+            set -- "$@" "-PpitestTargetClasses=$TARGETS"
+          fi
+          set +e
+          ./gradlew "$@" 2>&1 | tee "$RUNNER_TEMP/pit.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          set -- --rc "$rc" --log "$RUNNER_TEMP/pit.log" --mutations build/reports/pitest/mutations.xml
+          if [ -z "$TARGETS" ]; then
+            set -- "$@" --whole-project
+          fi
+          verdict=0
+          python3 .pth-checks/scripts/mutation-survivors.py pit-result "$@" > "$RUNNER_TEMP/pit-result.out" || verdict=$?
+          cat "$RUNNER_TEMP/pit-result.out"
+          result=$(sed -n 's/^result=//p' "$RUNNER_TEMP/pit-result.out")
+          reason=$(sed -n 's/^reason=//p' "$RUNNER_TEMP/pit-result.out")
+          if [ "$verdict" -ne 0 ]; then
+            echo "::error::PIT could not run: ${reason:-pit-result exit $verdict}"
+            exit 1
+          fi
+          if [ "$result" = "no-mutations" ]; then
+            echo "::notice::PIT found nothing to mutate in the changed classes: zero survivors."
+            echo "report=false" >> "$GITHUB_OUTPUT"
           else
-            ./gradlew -PGITHUB_USER="$PACKAGES_USER" -PGITHUB_TOKEN="$PACKAGES_TOKEN" pitest
+            echo "report=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Find survivors
-        if: steps.changes.outputs.run == 'true'
+        if: steps.pit.outputs.report == 'true'
         env:
           REPO_NAME: ${{ github.event.repository.name }}
           TARGETS: ${{ steps.changes.outputs.targets }}
@@ -176,7 +207,7 @@ jobs:
           echo "Survivor issues to consider: $(jq length "$RUNNER_TEMP/survivors.json")"
 
       - name: File one issue per class
-        if: steps.changes.outputs.run == 'true'
+        if: steps.pit.outputs.report == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}

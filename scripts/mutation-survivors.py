@@ -2,7 +2,7 @@
 """mutation-survivors.py: pick PIT targets and turn surviving mutants into issues.
 
 Usage:
-  mutation-survivors.py targets --changed <file-with-paths>
+  mutation-survivors.py targets --changed <file-with-paths> [--root <checkout>]
   mutation-survivors.py survivors --mutations <mutations.xml> --repo <name> --sha <sha>
                                   [--diff <unified-diff> --whole <globs>]
 
@@ -11,6 +11,20 @@ targets prints two lines: "targets=<comma globs>" and "whole=<comma globs>".
   src/test/java/a/b/CTest.java        -> a.b.C,a.b.C$*  (also whole-class)
   src/test/java/a/b/CProperties.java  -> a.b.C,a.b.C$*  (also whole-class)
   anything else is ignored.
+  A test file's target is dropped when <root>/src/main/java/a/b/C.java does
+  not exist (a test with no production class of that name); --root
+  defaults to the current directory.
+
+pit-result --rc <gradle exit> --log <gradle output> --mutations <mutations.xml>
+           [--whole-project]
+  decides whether PIT ran. Prints "result=ok|no-mutations|cannot-run" and
+  "reason=<text>". Exit 0 for ok and no-mutations (zero survivors: PIT found
+  nothing to mutate and wrote no report), 1 for cannot-run (tests fail under
+  PIT without mutation, a PIT or Gradle error, or no report when mutations
+  were found). With --whole-project (no target classes given), finding no
+  mutations is cannot-run: the classpath or the targetClasses glob is wrong.
+  Any non-zero Gradle exit is cannot-run, so callers MUST NOT set PIT's
+  mutationThreshold or coverageThreshold: survivors never fail a run.
 
 survivors prints a JSON array of {class, title, body}, one item per outer
 production class. SURVIVED and NO_COVERAGE both count as survivors (no test
@@ -22,6 +36,7 @@ Exit 2: unreadable input.
 import argparse
 import fnmatch
 import json
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -60,7 +75,7 @@ def cmd_targets(args):
                     targets.append(glob)
             continue
         m = TEST_RE.match(p)
-        if m:
+        if m and os.path.isfile(os.path.join(args.root, "src/main/java", m.group(1) + ".java")):
             for glob in class_globs(to_fqcn(m.group(1))):
                 if glob not in targets:
                     targets.append(glob)
@@ -68,6 +83,39 @@ def cmd_targets(args):
                     whole.append(glob)
     print("targets=" + ",".join(targets))
     print("whole=" + ",".join(whole))
+
+
+GREEN_SUITE_FAILED = "did not pass without mutation"
+# PIT logs this at java.util.logging WARNING, e.g. "7:13:35 AM PIT >> WARNING : No mutations found. ..."
+NO_MUTATIONS_RE = re.compile(r"PIT >> WARNING : No mutations found")
+
+
+def pit_verdict(rc, log, report_exists, whole_project=False):
+    """Return (result, reason). Survivors never matter here, only whether PIT ran."""
+    if rc != 0:
+        if GREEN_SUITE_FAILED in log:
+            return "cannot-run", "tests fail under PIT without mutation"
+        return "cannot-run", f"PIT or Gradle error (exit {rc})"
+    if report_exists:
+        return "ok", "PIT wrote its report"
+    if NO_MUTATIONS_RE.search(log):
+        if whole_project:
+            # Nothing to mutate in the whole project means the classpath or globs are wrong.
+            return "cannot-run", "PIT found no mutations in the whole project"
+        return "no-mutations", "PIT found nothing to mutate (zero survivors)"
+    return "cannot-run", "PIT wrote no report"
+
+
+def cmd_pit_result(args):
+    try:
+        with open(args.log, encoding="utf-8", errors="replace") as f:
+            log = f.read()
+    except OSError as e:
+        raise InputProblem(f"cannot read {args.log}: {e}")
+    result, reason = pit_verdict(args.rc, log, os.path.isfile(args.mutations), args.whole_project)
+    print(f"result={result}")
+    print(f"reason={reason}")
+    return 1 if result == "cannot-run" else 0
 
 
 def parse_diff(path):
@@ -192,6 +240,12 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("targets")
     t.add_argument("--changed", required=True)
+    t.add_argument("--root", default=".")
+    r = sub.add_parser("pit-result")
+    r.add_argument("--rc", required=True, type=int)
+    r.add_argument("--log", required=True)
+    r.add_argument("--mutations", required=True)
+    r.add_argument("--whole-project", action="store_true")
     s = sub.add_parser("survivors")
     s.add_argument("--mutations", required=True)
     s.add_argument("--repo", required=True)
@@ -199,12 +253,12 @@ def main():
     s.add_argument("--diff")
     s.add_argument("--whole")
     args = p.parse_args()
+    commands = {"targets": cmd_targets, "survivors": cmd_survivors, "pit-result": cmd_pit_result}
     try:
-        (cmd_targets if args.cmd == "targets" else cmd_survivors)(args)
+        return commands[args.cmd](args) or 0
     except InputProblem as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    return 0
 
 
 if __name__ == "__main__":

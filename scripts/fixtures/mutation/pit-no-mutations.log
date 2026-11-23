@@ -1,0 +1,7 @@
+> Task :pitest
+7:13:30 AM PIT >> INFO : Verbose logging is disabled. If you encounter a problem, please enable it before reporting an issue.
+7:13:35 AM PIT >> INFO : Created 0 mutation test units in pre scan
+7:13:35 AM PIT >> WARNING : No mutations found. This probably means there is an issue with either the supplied classpath or filters.
+7:13:35 AM PIT >> INFO : Skipping coverage and analysis as no mutations found
+
+BUILD SUCCESSFUL in 25s
